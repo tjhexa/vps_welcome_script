@@ -10,11 +10,12 @@
 # ------------------------------------------------------------------
 set -o pipefail
 
-# --- Colors (disable automatically when not a terminal) -------------
-if [ -t 1 ]; then
-  C_RESET="\e[0m"; C_BOLD="\e[1m"
-  C_CYA="\e[36m"; C_GRN="\e[32m"; C_YLW="\e[33m"; C_RED="\e[31m"; C_BLU="\e[34m"
-  C_DIM="\e[2m"
+# --- Colors (only when safe: real terminal, sane TERM, NO_COLOR unset) --
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+  ESC=$(printf '\033')
+  C_RESET="${ESC}[0m"; C_BOLD="${ESC}[1m"
+  C_CYA="${ESC}[36m"; C_GRN="${ESC}[32m"; C_YLW="${ESC}[33m"; C_RED="${ESC}[31m"; C_BLU="${ESC}[34m"
+  C_DIM="${ESC}[2m"
 else
   C_RESET=""; C_BOLD=""; C_CYA=""; C_GRN=""; C_YLW=""; C_RED=""; C_BLU=""; C_DIM=""
 fi
