@@ -6,7 +6,7 @@
 #   - Summary bar + health banner (issues at a glance)
 #   - Docker: containers table with status + health bar
 #   - Web server: nginx/apache sites with reverse-proxy info
-#   - Open ports + maintenance (updates, reboot, inodes)
+#   - Open ports + security (fail2ban jails, SSH failures) + maintenance
 #   - Dev tools versions, timing footer
 #   - Whole output wrapped in a screenfetch-style frame
 # Source this from ~/.bashrc to have it run on every new login shell.
@@ -413,14 +413,14 @@ apache_sites() {
 }
 
 if has nginx; then
-  st=$(systemctl is-active nginx 2>/dev/null || echo "unknown")
+  st=$(systemctl is-active nginx 2>/dev/null | head -1); [ -z "$st" ] && st="unknown"
   if systemctl is-enabled nginx >/dev/null 2>&1; then en="enabled"; else en="disabled"; fi
   print_row "nginx" "${C_GRN}$st${C_RESET} (${C_DIM}$en${C_RESET})"
   nginx_sites
 fi
 if has apache2 || has httpd; then
   [ -x /usr/sbin/httpd ] && apache_bin=httpd || apache_bin=apache2
-  st=$(systemctl is-active "$apache_bin" 2>/dev/null || echo "unknown")
+  st=$(systemctl is-active "$apache_bin" 2>/dev/null | head -1); [ -z "$st" ] && st="unknown"
   if systemctl is-enabled "$apache_bin" >/dev/null 2>&1; then en="enabled"; else en="disabled"; fi
   print_row "apache" "${C_GRN}$st${C_RESET} (${C_DIM}$en${C_RESET})"
   apache_sites
@@ -449,6 +449,62 @@ if has ss; then
   tborder $PW1 $PW2 $PW3 $PW4
 else
   print_row "Open ports" "${C_DIM}ss unavailable${C_RESET}"
+fi
+
+# --- Security (fail2ban shown only when installed) -------------------
+if has fail2ban-client; then
+  section "Security"
+  if has systemctl; then
+    st=$(systemctl is-active fail2ban 2>/dev/null | head -1); [ -z "$st" ] && st="unknown"
+    ver=$(fail2ban-client --version 2>/dev/null | head -1 | sed 's/.*v//')
+    print_row "fail2ban" "${C_GRN}${st}${C_RESET}${ver:+ ${C_DIM}(v${ver})${C_RESET}}"
+  fi
+  f2b=(fail2ban-client)
+  if has sudo && sudo -n true 2>/dev/null; then f2b=(sudo -n fail2ban-client); fi
+  f2b_out=$("${f2b[@]}" status 2>/dev/null)
+  if [ -z "$f2b_out" ]; then
+    print_row "Jails" "${C_DIM}no socket access (root or fail2ban group)${C_RESET}"
+  else
+    jails=$(printf '%s' "$f2b_out" | sed -n 's/.*Jail list:[[:space:]]*//p')
+    if [ -z "$jails" ]; then
+      print_row "Jails" "${C_BOLD}0${C_RESET} configured"
+    else
+      IFS=',' read -ra jailarr <<< "$jails"
+      print_row "Jails" "${C_BOLD}${#jailarr[@]}${C_RESET} configured"
+      SW1=14; SW2=10; SW3=12
+      tborder $SW1 $SW2 $SW3
+      printf "  ${C_DIM}| %-${SW1}s | %-${SW2}s | %-${SW3}s |${C_RESET}\n" "JAIL" "BANNED NOW" "BANNED TOT"
+      tborder $SW1 $SW2 $SW3
+      for j in "${jailarr[@]}"; do
+        j=${j// /}
+        [ -z "$j" ] && continue
+        jst=$("${f2b[@]}" status "$j" 2>/dev/null)
+        cur=$(printf '%s' "$jst" | sed -n 's/.*Currently banned:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+        tot=$(printf '%s' "$jst" | sed -n 's/.*Total banned:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+        ccol="${C_GRN}"; [ "${cur:-0}" -gt 0 ] && ccol="${C_RED}"
+        checks_total=$((checks_total + 1))
+        printf "  | %-${SW1}s | %s%-${SW2}s%s | %-${SW3}s |\n" \
+          "$j" "$ccol" "${cur:-0}" "$C_RESET" "${tot:-0}"
+      done
+      tborder $SW1 $SW2 $SW3
+    fi
+  fi
+  # failed SSH login attempts (best-effort; journald preferred, auth.log fallback)
+  if has journalctl; then
+    if has timeout; then
+      failed=$(timeout 4 journalctl -u ssh -u sshd -S "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" 2>/dev/null)
+    else
+      failed=$(journalctl -u ssh -u sshd -S "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" 2>/dev/null)
+    fi
+    [ -z "$failed" ] && failed=0
+    print_row "SSH fails" "${C_YLW}${failed}${C_RESET} ${C_DIM}(last 24h)${C_RESET}"
+    checks_total=$((checks_total + 1))
+  elif [ -f /var/log/auth.log ]; then
+    failed=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null)
+    [ -z "$failed" ] && failed=0
+    print_row "SSH fails" "${C_YLW}${failed}${C_RESET} ${C_DIM}(all time)${C_RESET}"
+    checks_total=$((checks_total + 1))
+  fi
 fi
 
 # --- Maintenance -----------------------------------------------------
