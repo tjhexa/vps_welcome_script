@@ -21,6 +21,10 @@ else
 fi
 
 has() { command -v "$1" >/dev/null 2>&1; }
+# section + table helpers
+section() { printf "${C_BOLD}${C_CYA}── %s${C_RESET}\n" "$1"; }
+trunc() { local s="$1" n="$2"; [ "${#s}" -gt "$n" ] && s="${s:0:$((n-1))}.."; printf '%s' "$s"; }
+tborder() { local bar="+" w; for w in "$@"; do bar+="$(printf '%*s' $((w+2)) '' | tr ' ' '-')+"; done; printf "  ${C_DIM}%s${C_RESET}\n" "$bar"; }
 
 # --- Header ----------------------------------------------------------
 print_row() { printf "${C_DIM}%-16s${C_RESET} %s\n" "$1" "$2"; }
@@ -96,11 +100,25 @@ swap_used=$((swap_total - swap_free))
 print_row "Swap"        "$((swap_used / 1024)) MB / $((swap_total / 1024)) MB"
 
 # --- Disk ------------------------------------------------------------
-printf "${C_DIM}%-16s${C_RESET}\n" "Disk"
-df -h -x tmpfs -x devtmpfs -x overlay -x squashfs --output=target,size,used,pcent 2>/dev/null \
-  | awk -v hdr="${C_DIM}" -v rst="${C_RESET}" \
-      'NR==1{print "  "hdr $0 rst; next} {print "  "$0}' \
-  || df -h | head -8
+section "Disk"
+if df -h -x tmpfs -x devtmpfs -x overlay -x squashfs --output=source,target,size,used,pcent >/dev/null 2>&1; then
+  DW1=25; DW2=14; DW3=6; DW4=6; DW5=6
+  tborder $DW1 $DW2 $DW3 $DW4 $DW5
+  printf "  ${C_DIM}| %-${DW1}s | %-${DW2}s | %-${DW3}s | %-${DW4}s | %-${DW5}s |${C_RESET}\n" "MOUNT" "DEVICE" "SIZE" "USED" "USE%"
+  tborder $DW1 $DW2 $DW3 $DW4 $DW5
+  df -h -x tmpfs -x devtmpfs -x overlay -x squashfs --output=source,target,size,used,pcent 2>/dev/null | tail -n +2 | \
+  while read -r src mnt size used pct; do
+    p=${pct%\%}
+    if   [ "$p" -ge 80 ]; then pcol="${C_RED}"
+    elif [ "$p" -ge 60 ]; then pcol="${C_YLW}"
+    else pcol="${C_GRN}"; fi
+    printf "  | %-${DW1}s | %-${DW2}s | %-${DW3}s | %-${DW4}s | %s%-${DW5}s%s |\n" \
+      "$(trunc "$mnt" $DW1)" "$(trunc "$src" $DW2)" "$size" "$used" "$pcol" "$pct" "$C_RESET"
+  done
+  tborder $DW1 $DW2 $DW3 $DW4 $DW5
+else
+  df -h -x tmpfs -x devtmpfs -x overlay -x squashfs | head -8
+fi
 
 # --- Network ---------------------------------------------------------
 lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -1)
@@ -132,7 +150,6 @@ fi
 # ======================================================================
 #  EXTRA SECTIONS (docker / web server / dev tools)
 # ======================================================================
-section() { printf "${C_BOLD}${C_CYA}── %s${C_RESET}\n" "$1"; }
 
 # --- Docker ----------------------------------------------------------
 section "Docker"
@@ -153,12 +170,10 @@ if has docker; then
       print_row "Containers" "${hcol}[${bfill}${brest}]${C_RESET} ${C_BOLD}${running} up / ${total} total${C_RESET}"
     fi
 
-    trunc() { local s="$1" n="$2"; [ "${#s}" -gt "$n" ] && s="${s:0:$((n-1))}.."; printf '%s' "$s"; }
     CW1=20; CW2=28; CW3=12
-    border="+$(printf '%*s' $((CW1+2)) '' | tr ' ' '-')+$(printf '%*s' $((CW2+2)) '' | tr ' ' '-')+$(printf '%*s' $((CW3+2)) '' | tr ' ' '-')+"
-    printf "  ${C_DIM}$border${C_RESET}\n"
+    tborder $CW1 $CW2 $CW3
     printf "  ${C_DIM}| %-${CW1}s | %-${CW2}s | %-${CW3}s |${C_RESET}\n" "NAME" "IMAGE" "STATUS"
-    printf "  ${C_DIM}$border${C_RESET}\n"
+    tborder $CW1 $CW2 $CW3
 
     if [ "$running" -gt 0 ]; then
       while IFS='|' read -r cname cimage cstate cstatus; do
@@ -179,7 +194,7 @@ if has docker; then
     else
       printf "  ${C_DIM}no containers running${C_RESET}\n"
     fi
-    printf "  ${C_DIM}$border${C_RESET}\n"
+    tborder $CW1 $CW2 $CW3
   else
     print_row "Engine" "${C_RED}daemon not running or no permission${C_RESET}"
   fi
