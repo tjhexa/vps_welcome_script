@@ -1,0 +1,5 @@
+# local planning doc (not meant for the repo)
+PLAN.md
+
+# rust build output (gui/)
+target/
