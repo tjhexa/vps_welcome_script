@@ -2,18 +2,25 @@
 # ------------------------------------------------------------------
 # vps-info.sh
 # Quick overview of VPS / machine basic details.
-#   - System, CPU, memory, disk, network
+#   - System, CPU, memory, disk, network (+DNS, geo details, cached IP)
 #   - Summary bar + health banner (issues at a glance)
 #   - Docker: containers table with status + health bar
 #   - Web server: nginx/apache sites with reverse-proxy info
 #   - Open ports + maintenance (updates, reboot, inodes)
-#   - Dev tools: node/java/python/go/rust/... versions
+#   - Dev tools versions, timing footer
+#   - Whole output wrapped in a screenfetch-style frame
 # Source this from ~/.bashrc to have it run on every new login shell.
 # ------------------------------------------------------------------
 set -o pipefail
 
+TTY_OK=0; [ -t 1 ] && TTY_OK=1
+checks_total=0
+# ms-resolution clock (GNU date); plain seconds fallback (BSD/macOS)
+if date -d @0 +%3N >/dev/null 2>&1; then now_ms() { date +%s%3N; }; else now_ms() { date +%s; }; fi
+_start_ms=$(now_ms)
+
 # --- Colors (only when safe: real terminal, sane TERM, NO_COLOR unset) --
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+if [ "$TTY_OK" = "1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
   ESC=$(printf '\033')
   C_RESET="${ESC}[0m"; C_BOLD="${ESC}[1m"
   C_CYA="${ESC}[36m"; C_GRN="${ESC}[32m"; C_YLW="${ESC}[33m"; C_RED="${ESC}[31m"; C_BLU="${ESC}[34m"
@@ -24,7 +31,7 @@ fi
 
 has() { command -v "$1" >/dev/null 2>&1; }
 # section + table helpers
-section() { printf "${C_BOLD}${C_CYA}── %s${C_RESET}\n" "$1"; }
+section() { checks_total=$((checks_total + 1)); printf "${C_BOLD}${C_CYA}── %s${C_RESET}\n" "$1"; }
 trunc() { local s="$1" n="$2"; [ "${#s}" -gt "$n" ] && s="${s:0:$((n-1))}.."; printf '%s' "$s"; }
 tborder() { local bar="+" w; for w in "$@"; do bar+="$(printf '%*s' $((w+2)) '' | tr ' ' '-')+"; done; printf "  ${C_DIM}%s${C_RESET}\n" "$bar"; }
 
@@ -102,17 +109,36 @@ pre_scan() {
 pre_scan
 
 # --- Header ----------------------------------------------------------
-print_row() { printf "${C_DIM}%-16s${C_RESET} %s\n" "$1" "$2"; }
+print_row() { checks_total=$((checks_total + 1)); printf "${C_DIM}%-16s${C_RESET} %s\n" "$1" "$2"; }
 
+# --- framing: capture body, then draw a screenfetch-style box ---------
+OUTTMP=$(mktemp "${TMPDIR:-/tmp}/vpsinfo.XXXXXX")
+strip_ansi() { sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g'; }
+frame() {
+  local file="$1" maxw=0 line vis pad first=1
+  while IFS= read -r line; do
+    vis=$(printf '%s' "$line" | strip_ansi)
+    [ "${#vis}" -gt "$maxw" ] && maxw=${#vis}
+  done < "$file"
+  local top
+  top=$(printf '%*s' $((maxw + 2)) '' | tr ' ' '-')
+  printf "${C_BOLD}${C_CYA}+%s+${C_RESET}\n" "$top"
+  while IFS= read -r line; do
+    vis=$(printf '%s' "$line" | strip_ansi)
+    pad=$((maxw - ${#vis})); [ "$pad" -lt 0 ] && pad=0
+    printf "${C_CYA}|${C_RESET} %s%*s ${C_CYA}|${C_RESET}\n" "$line" "$pad" ''
+    if [ "$first" = "1" ]; then
+      dashes=$(printf '%*s' "$maxw" '' | tr ' ' '-')
+      printf "${C_CYA}|${C_RESET} ${C_DIM}%s${C_RESET} ${C_CYA}|${C_RESET}\n" "$dashes"
+      first=
+    fi
+  done < "$file"
+  printf "${C_BOLD}${C_CYA}+%s+${C_RESET}\n" "$top"
+}
+
+{  # ---------- framed body begins ----------
+printf "${C_BOLD}%s${C_RESET}\n" "VPS / SYSTEM INFO - $(date +'%a %b %d %H:%M')"
 echo
-TITLE="VPS / SYSTEM INFO"
-STAMP="$(date +'%a %b %d %H:%M')"
-INNER_LEN=$(( ${#TITLE} + ${#STAMP} + 3 ))
-BOX_LEN=$(( INNER_LEN + 2 ))
-bar=$(printf '%*s' "$BOX_LEN" '' | tr ' ' '-')
-printf "${C_BOLD}${C_CYA} .${bar}.${C_RESET}\n"
-printf "${C_BOLD}${C_CYA} | ${C_RESET}${C_BOLD}%s${C_RESET}${C_DIM} - ${C_RESET}${C_BOLD}%s${C_RESET}${C_CYA} |${C_RESET}\n" "$TITLE" "$STAMP"
-printf "${C_BOLD}${C_CYA} '${bar}'${C_RESET}\n"
 
 # --- summary bar -----------------------------------------------------
 if [[ "$CPU_PCT" =~ ^[0-9]+$ ]]; then
@@ -207,6 +233,7 @@ if df -h -x tmpfs -x devtmpfs -x overlay -x squashfs --output=source,target,size
     if   [ "$p" -ge 80 ]; then pcol="${C_RED}"
     elif [ "$p" -ge 60 ]; then pcol="${C_YLW}"
     else pcol="${C_GRN}"; fi
+    checks_total=$((checks_total + 1))
     printf "  | %-${DW1}s | %-${DW2}s | %-${DW3}s | %-${DW4}s | %s%-${DW5}s%s |\n" \
       "$(trunc "$mnt" $DW1)" "$(trunc "$src" $DW2)" "$size" "$used" "$pcol" "$pct" "$C_RESET"
   done
@@ -218,26 +245,48 @@ fi
 # --- Network ---------------------------------------------------------
 lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -1)
 [ -n "$lan" ] && print_row "LAN IP" "${lan}"
+
+dns=$(grep -hE '^nameserver[[:space:]]+' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | sort -u | paste -sd' ' -)
+[ -n "$dns" ] && print_row "DNS" "$dns"
+
+NET_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/vpsinfo-net"
+NET_SRC="n/a"
 if [ -n "${NO_PUBLIC_IP:-}" ]; then
   print_row "Public IP" "${C_DIM}skipped (NO_PUBLIC_IP=1)${C_RESET}"
 elif has curl; then
-  # cached public IP (1h TTL) so logins don't hit the network every time
-  cache="${XDG_CACHE_HOME:-$HOME/.cache}/vpsinfo-public-ip"
   now=$(date +%s)
-  pub=""
-  if [ -f "$cache" ] && [ $(( now - $(stat -c %Y "$cache" 2>/dev/null || echo 0) )) -lt 3600 ]; then
-    pub=$(cat "$cache")
+  cached_age=999999
+  [ -f "$NET_CACHE" ] && cached_age=$(( now - $(stat -c %Y "$NET_CACHE" 2>/dev/null || echo 0) ))
+  if [ -f "$NET_CACHE" ] && [ "$cached_age" -lt 3600 ]; then
+    IFS=$'\t' read -r pub geo _ < "$NET_CACHE"
+    NET_SRC="cached"
   else
     pub=$(curl -4 -s --max-time 3 https://ifconfig.me 2>/dev/null)
     [ -z "$pub" ] && pub=$(curl -6 -s --max-time 3 https://ifconfig.me 2>/dev/null)
     if [ -n "$pub" ]; then
-      mkdir -p "$(dirname "$cache")"
-      printf '%s' "$pub" > "$cache"
+      if [ -z "${VPSINFO_SKIP_GEO:-}" ]; then
+        gj=$(curl -s --max-time 4 "https://ipinfo.io/${pub}/json" 2>/dev/null)
+        city=$(printf '%s' "$gj" | sed -n 's/.*"city":[[:space:]]*"\([^"]*\)".*/\1/p')
+        region=$(printf '%s' "$gj" | sed -n 's/.*"region":[[:space:]]*"\([^"]*\)".*/\1/p')
+        country=$(printf '%s' "$gj" | sed -n 's/.*"country":[[:space:]]*"\([^"]*\)".*/\1/p')
+        org=$(printf '%s' "$gj" | sed -n 's/.*"org":[[:space:]]*"\([^"]*\)".*/\1/p')
+        geo="$city"
+        [ -n "$region" ] && geo="$geo, $region"
+        [ -n "$country" ] && geo="$geo, $country"
+        [ -n "$org" ] && geo="$geo ($org)"
+      fi
+      mkdir -p "$(dirname "$NET_CACHE")"
+      printf '%s\t%s\n' "$pub" "$geo" > "$NET_CACHE"
+      NET_SRC="fetched"
     else
-      [ -f "$cache" ] && pub=$(cat "$cache")   # offline: fall back to stale value
+      if [ -f "$NET_CACHE" ]; then
+        IFS=$'\t' read -r pub geo _ < "$NET_CACHE"
+        NET_SRC="stale"
+      fi
     fi
   fi
   [ -n "$pub" ] && print_row "Public IP" "$pub" || print_row "Public IP" "${C_DIM}unreachable (offline?)${C_RESET}"
+  [ -n "$geo" ] && print_row "Geo / ASN" "${C_DIM}$geo${C_RESET}"
 else
   print_row "Public IP" "${C_DIM}curl not installed${C_RESET}"
 fi
@@ -301,6 +350,7 @@ if has docker; then
           *)           tag="$cstate";  col="${C_DIM}"; raw="" ;;
         esac
         dur=$(printf '%s' "$raw" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9]+$/){n=$i}else if($i~/^hour/){if(n=="")n="~1";printf "%sh",n}else if($i~/^minute/){if(n=="")n="~1";printf "%sm",n}else if($i~/^day/){if(n=="")n="~1";printf "%sd",n}else if($i~/^second/){if(n=="")n="~1";printf "%ss",n}}}')
+        checks_total=$((checks_total + 1))
         printf "  | %-${CW1}s | %-${CW2}s | %s%-${CW3}s%s |\n" \
           "$(trunc "$cname" $CW1)" "$(trunc "$cimage" $CW2)" "$col" "${tag}${dur:+ $dur}" "$C_RESET"
       done < <(docker ps --format '{{.Names}}|{{.Image}}|{{.State}}|{{.Status}}')
@@ -392,6 +442,7 @@ if has ss; then
   while read -r netid state _ _ local _ proc; do
     prog=$(printf '%s' "$proc" | sed -E 's/.*users:\(\("([^"]+)".*/\1/')
     [ -n "$prog" ] && prog=$(trunc "$prog" $PW4) || prog="-"
+    checks_total=$((checks_total + 1))
     printf "  | %-${PW1}s | %-${PW2}s | %-${PW3}s | %-${PW4}s |\n" \
       "${netid:-?}" "$(trunc "$local" $PW2)" "${state:-?}" "$prog"
   done
@@ -452,6 +503,7 @@ tools=(
 )
 for entry in "${tools[@]}"; do
   IFS=':' read -r name cmd <<< "$entry"
+  checks_total=$((checks_total + 1))
   if has "$name"; then
     ver=$($cmd 2>&1 | sed -n '/[^[:space:]]/{p;q}')
     printf "  ${C_GRN}%-10s${C_RESET} %s\n" "$name" "$ver"
@@ -460,4 +512,14 @@ for entry in "${tools[@]}"; do
   fi
 done
 
+# --- footer ----------------------------------------------------------
+el_ms=$(( $(now_ms) - _start_ms ))
+if [ "$_start_ms" -lt 1000000000 ]; then el_txt="${el_ms}s"
+else el_txt=$(awk -v ms="$el_ms" 'BEGIN{printf "%.1fs", ms/1000}'); fi
+printf "  ${C_GRN}[+]${C_RESET} %s checks retrieved - %s - public IP: ${C_DIM}%s${C_RESET}\n" \
+  "$checks_total" "$el_txt" "${NET_SRC:-n/a}"
 echo
+} > "$OUTTMP" 2>/dev/null   # ---------- framed body ends ----------
+
+frame "$OUTTMP"
+rm -f "$OUTTMP"
