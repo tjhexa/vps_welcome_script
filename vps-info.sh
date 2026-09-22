@@ -3,8 +3,10 @@
 # vps-info.sh
 # Quick overview of VPS / machine basic details.
 #   - System, CPU, memory, disk, network
-#   - Docker: installed, running containers (name/image/status/ports)
-#   - Web server: nginx/apache status + sites with reverse-proxy info
+#   - Summary bar + health banner (issues at a glance)
+#   - Docker: containers table with status + health bar
+#   - Web server: nginx/apache sites with reverse-proxy info
+#   - Open ports + maintenance (updates, reboot, inodes)
 #   - Dev tools: node/java/python/go/rust/... versions
 # Source this from ~/.bashrc to have it run on every new login shell.
 # ------------------------------------------------------------------
@@ -26,6 +28,79 @@ section() { printf "${C_BOLD}${C_CYA}── %s${C_RESET}\n" "$1"; }
 trunc() { local s="$1" n="$2"; [ "${#s}" -gt "$n" ] && s="${s:0:$((n-1))}.."; printf '%s' "$s"; }
 tborder() { local bar="+" w; for w in "$@"; do bar+="$(printf '%*s' $((w+2)) '' | tr ' ' '-')+"; done; printf "  ${C_DIM}%s${C_RESET}\n" "$bar"; }
 
+# --- Pre-scan (cheap metrics, computed once, reused everywhere) -------
+cpu_usage() {
+  local prev_idle=0 prev_total=0 idle total diff_idle diff_total
+  while read -r _ a b c d e f g h i j k; do
+    idle=$((d + e)); total=$((a + b + c + idle + f + g + h + i + j + k))
+    prev_idle=$idle; prev_total=$total
+    break
+  done < /proc/stat
+  [ -n "${VPSINFO_SKIP_CPU:-}" ] && { echo "-"; return; }
+  sleep 0.2
+  while read -r _ a b c d e f g h i j k; do
+    idle=$((d + e)); total=$((a + b + c + idle + f + g + h + i + j + k))
+    break
+  done < /proc/stat
+  diff_idle=$((idle - prev_idle)); diff_total=$((total - prev_total))
+  echo $((100 * (diff_total - diff_idle) / diff_total))
+}
+pre_scan() {
+  read -r load1 load5 load15 _ < /proc/loadavg
+  nproc=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+  cpu_cores=$(grep -c '^processor' /proc/cpuinfo)
+
+  CPU_PCT=$(cpu_usage)
+
+  mem_total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+  mem_avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+  mem_used=$((mem_total - mem_avail))
+  MEM_PCT=$((100 * mem_used / mem_total))
+
+  failed_raw=""
+  if has systemctl; then failed_raw=$(systemctl --failed --no-legend --plain 2>/dev/null); fi
+  failed_count=0; failed_list=""
+  if [ -n "$failed_raw" ]; then
+    failed_list=$(printf '%s' "$failed_raw" | awk '{print $1}' | paste -sd, -)
+    failed_count=$(printf '%s\n' "$failed_raw" | grep -c . || true)
+  fi
+
+  reboot_req="no"; [ -f /var/run/reboot-required ] && reboot_req="yes"
+
+  updates_pending=0
+  if [ -z "${VPSINFO_SKIP_UPDATES:-}" ]; then
+    if [ -r /var/lib/update-notifier/updates-available ]; then
+      updates_pending=$(grep -m1 -E '^[0-9]+ updates? can be applied' /var/lib/update-notifier/updates-available 2>/dev/null | awk '{print $1}')
+      [[ "$updates_pending" =~ ^[0-9]+$ ]] || updates_pending=0
+    elif has apt; then
+      updates_pending=$(apt list --upgradable 2>/dev/null | sed -n '2,$p' | grep -c . || true)
+    elif has dnf; then
+      updates_pending=$(dnf -q check-update 2>/dev/null | grep -vc '^$' || true)
+    fi
+  fi
+
+  docker_ok=0; docker_running_ct=0; docker_total_ct=0
+  if has docker && docker info >/dev/null 2>&1; then
+    docker_ok=1
+    docker_running_ct=$(docker ps -q | wc -l)
+    docker_total_ct=$(docker ps -aq | wc -l)
+  fi
+
+  disk_worst=0; disk_warn_n=0; disk_warns=""
+  if df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs --output=target,size,pcent >/dev/null 2>&1; then
+    while read -r m sz p; do
+      p=${p%\%}
+      [ "$sz" -lt 1073741824 ] && continue          # skip tiny pseudo-filesystems
+      [ "$p" -gt "$disk_worst" ] && disk_worst=$p
+      if [ "$p" -ge 80 ]; then
+        disk_warn_n=$((disk_warn_n + 1))
+        disk_warns="${disk_warns:+$disk_warns, }${m} at ${p}%"
+      fi
+    done < <(df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs --output=target,size,pcent 2>/dev/null | tail -n +2)
+  fi
+}
+pre_scan
+
 # --- Header ----------------------------------------------------------
 print_row() { printf "${C_DIM}%-16s${C_RESET} %s\n" "$1" "$2"; }
 
@@ -38,6 +113,44 @@ bar=$(printf '%*s' "$BOX_LEN" '' | tr ' ' '-')
 printf "${C_BOLD}${C_CYA} .${bar}.${C_RESET}\n"
 printf "${C_BOLD}${C_CYA} | ${C_RESET}${C_BOLD}%s${C_RESET}${C_DIM} - ${C_RESET}${C_BOLD}%s${C_RESET}${C_CYA} |${C_RESET}\n" "$TITLE" "$STAMP"
 printf "${C_BOLD}${C_CYA} '${bar}'${C_RESET}\n"
+
+# --- summary bar -----------------------------------------------------
+if [[ "$CPU_PCT" =~ ^[0-9]+$ ]]; then
+  [ "$CPU_PCT" -ge 80 ] && cpuc="${C_RED}" || { [ "$CPU_PCT" -ge 60 ] && cpuc="${C_YLW}" || cpuc="${C_GRN}"; }
+else cpuc="${C_DIM}"; fi
+[ "$MEM_PCT" -ge 80 ] && memc="${C_RED}" || { [ "$MEM_PCT" -ge 60 ] && memc="${C_YLW}" || memc="${C_GRN}"; }
+[ "$disk_worst" -ge 80 ] && disc="${C_RED}" || { [ "$disk_worst" -ge 60 ] && disc="${C_YLW}" || disc="${C_GRN}"; }
+sum="CPU ${cpuc}${CPU_PCT}%${C_RESET} | MEM ${memc}${MEM_PCT}%${C_RESET} | DISK ${disc}${disk_worst}%${C_RESET}"
+if [ "$docker_ok" = "1" ]; then
+  [ "$docker_running_ct" -lt "$docker_total_ct" ] && dcol="${C_YLW}" || dcol="${C_GRN}"
+  sum="$sum | containers ${dcol}${docker_running_ct}/${docker_total_ct}${C_RESET}"
+fi
+sum="$sum | load ${C_DIM}${load1}${C_RESET}"
+printf "  ${C_BOLD}%s${C_RESET}\n" "$sum"
+echo
+
+# --- health banner ---------------------------------------------------
+issues=()
+add_issue() { issues+=("$1"); }
+[ "$MEM_PCT" -ge 80 ] && add_issue "memory ${MEM_PCT}%"
+[ "$disk_warn_n" -gt 0 ] && add_issue "disk ${disk_warns}"
+[ "$failed_count" -gt 0 ] && add_issue "${failed_count} failed unit(s)"
+awk -v l="$load1" -v c="$nproc" 'BEGIN{exit !(l>=c)}' && add_issue "load ${load1} >= ${nproc} cores"
+[ "$reboot_req" = "yes" ] && add_issue "reboot required"
+[ "$updates_pending" -gt 0 ] && add_issue "${updates_pending} updates pending"
+if [ "$docker_ok" = "1" ] && [ "$docker_running_ct" -lt "$docker_total_ct" ]; then
+  add_issue "${docker_running_ct}/${docker_total_ct} containers down"
+fi
+if [ "${#issues[@]}" -gt 0 ]; then
+  msg=""
+  for it in "${issues[@]:0:3}"; do msg="${msg:+$msg | }$it"; done
+  extra=$(( ${#issues[@]} - 3 )); [ "$extra" -le 0 ] && extra=0
+  [ "$extra" -gt 0 ] && msg="$msg | +${extra} more"
+  printf "  ${C_RED}[!] ${#issues[@]} issue(s): ${msg}${C_RESET}\n"
+else
+  printf "  ${C_GRN}[+] all systems nominal${C_RESET}\n"
+fi
+echo
 
 # --- System ----------------------------------------------------------
 HOST=$(hostname -f 2>/dev/null || hostname)
@@ -64,37 +177,19 @@ print_row "Load (1/5/15)" "$(cut -d' ' -f1-3 /proc/loadavg)"
 
 # --- CPU -------------------------------------------------------------
 cpu_model=$(grep -m1 "model name" /proc/cpuinfo | sed 's/.*: *//')
-cpu_cores=$(grep -c '^processor' /proc/cpuinfo)
 print_row "CPU"         "${cpu_model:-unknown}"
-print_row "Cores"       "${cpu_cores} (${C_DIM}$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo $cpu_cores) online${C_RESET})"
-
-# CPU usage (idle delta over ~1s)
-cpu_usage() {
-  local prev_idle prev_total idle total diff_idle diff_total
-  prev_total=0; prev_idle=0
-  while read -r _ a b c d e f g h i j k; do
-    idle=$((d + e)); total=$((a + b + c + idle + f + g + h + i + j + k))
-    prev_idle=$idle; prev_total=$total
-    break
-  done < /proc/stat
-  sleep 1
-  while read -r _ a b c d e f g h i j k; do
-    idle=$((d + e)); total=$((a + b + c + idle + f + g + h + i + j + k))
-    break
-  done < /proc/stat
-  diff_idle=$((idle - prev_idle)); diff_total=$((total - prev_total))
-  echo $((100 * (diff_total - diff_idle) / diff_total))
-}
-if has bc || true; then CPU_PCT=$(cpu_usage); else CPU_PCT="-"; fi
-print_row "CPU usage"   "${CPU_PCT}% ${C_DIM}(1s sample)${C_RESET}"
+print_row "Cores"       "${cpu_cores} (${C_DIM}${nproc} online${C_RESET})"
+if [ "${CPU_PCT}" = "-" ]; then
+  print_row "CPU usage" "${C_DIM}skipped (VPSINFO_SKIP_CPU=1)${C_RESET}"
+else
+  cpuc="${C_GRN}"; [ "$CPU_PCT" -ge 80 ] && cpuc="${C_RED}" || [ "$CPU_PCT" -ge 60 ] && cpuc="${C_YLW}"
+  print_row "CPU usage" "${cpuc}${CPU_PCT}%${C_RESET} ${C_DIM}(0.2s sample)${C_RESET}"
+fi
 
 # --- Memory ----------------------------------------------------------
 mem_info() { awk -F': *' -v key="$1" '$0 ~ key {gsub(/kB/,""); print $2}' /proc/meminfo; }
-mem_total=$(mem_info '^MemTotal'); mem_avail=$(mem_info '^MemAvailable')
-mem_used=$((mem_total - mem_avail))
-pct=$((100 * mem_used / mem_total))
-color="${C_GRN}"; [ "$pct" -ge 80 ] && color="${C_RED}" || [ "$pct" -ge 60 ] && color="${C_YLW}"
-print_row "Memory"      "${color}${pct}%${C_RESET} used  $((mem_used / 1024)) MB / $((mem_total / 1024)) MB"
+[ "$MEM_PCT" -ge 80 ] && mcol="${C_RED}" || { [ "$MEM_PCT" -ge 60 ] && mcol="${C_YLW}" || mcol="${C_GRN}"; }
+print_row "Memory"      "${mcol}${MEM_PCT}%${C_RESET} used  $((mem_used / 1024)) MB / $((mem_total / 1024)) MB"
 swap_total=$(mem_info '^SwapTotal'); swap_free=$(mem_info '^SwapFree')
 swap_used=$((swap_total - swap_free))
 print_row "Swap"        "$((swap_used / 1024)) MB / $((swap_total / 1024)) MB"
@@ -123,12 +218,28 @@ fi
 # --- Network ---------------------------------------------------------
 lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -1)
 [ -n "$lan" ] && print_row "LAN IP" "${lan}"
-if [ -z "$NO_PUBLIC_IP" ] && has curl; then
-  pub=$(curl -4 -s --max-time 3 https://ifconfig.me 2>/dev/null)
-  if [ -z "$pub" ]; then pub=$(curl -6 -s --max-time 3 https://ifconfig.me 2>/dev/null); fi
+if [ -n "${NO_PUBLIC_IP:-}" ]; then
+  print_row "Public IP" "${C_DIM}skipped (NO_PUBLIC_IP=1)${C_RESET}"
+elif has curl; then
+  # cached public IP (1h TTL) so logins don't hit the network every time
+  cache="${XDG_CACHE_HOME:-$HOME/.cache}/vpsinfo-public-ip"
+  now=$(date +%s)
+  pub=""
+  if [ -f "$cache" ] && [ $(( now - $(stat -c %Y "$cache" 2>/dev/null || echo 0) )) -lt 3600 ]; then
+    pub=$(cat "$cache")
+  else
+    pub=$(curl -4 -s --max-time 3 https://ifconfig.me 2>/dev/null)
+    [ -z "$pub" ] && pub=$(curl -6 -s --max-time 3 https://ifconfig.me 2>/dev/null)
+    if [ -n "$pub" ]; then
+      mkdir -p "$(dirname "$cache")"
+      printf '%s' "$pub" > "$cache"
+    else
+      [ -f "$cache" ] && pub=$(cat "$cache")   # offline: fall back to stale value
+    fi
+  fi
   [ -n "$pub" ] && print_row "Public IP" "$pub" || print_row "Public IP" "${C_DIM}unreachable (offline?)${C_RESET}"
 else
-  print_row "Public IP" "${C_DIM}skipped (NO_PUBLIC_IP=1)${C_RESET}"
+  print_row "Public IP" "${C_DIM}curl not installed${C_RESET}"
 fi
 
 # --- Processes / users ----------------------------------------------
@@ -142,9 +253,11 @@ lastlogin=$(last -n 1 "$USER" 2>/dev/null | head -1 | awk '{$1=""; sub(/^ +/,"")
 
 # --- Services quick check -------------------------------------------
 if has systemctl; then
-  failed=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
-  [ "$failed" -gt 0 ] && print_row "Failed srvcs" "${C_RED}$failed unit(s) FAILED${C_RESET}" \
-                     || print_row "Failed srvcs" "${C_GRN}none${C_RESET}"
+  if [ "$failed_count" -gt 0 ]; then
+    print_row "Failed srvcs" "${C_RED}${failed_list}${C_RESET} ${C_DIM}($failed_count unit(s))${C_RESET}"
+  else
+    print_row "Failed srvcs" "${C_GRN}none${C_RESET}"
+  fi
 fi
 
 # ======================================================================
@@ -155,9 +268,9 @@ fi
 section "Docker"
 if has docker; then
   print_row "Docker" "client $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
-  if docker info >/dev/null 2>&1; then
-    running=$(docker ps -q | wc -l)
-    total=$(docker ps -aq | wc -l)
+  if [ "$docker_ok" = "1" ]; then
+    running=$docker_running_ct
+    total=$docker_total_ct
 
     # gamified health bar
     if [ "$total" -gt 0 ]; then
@@ -264,6 +377,54 @@ if has apache2 || has httpd; then
 fi
 if ! has nginx && ! has apache2 && ! has httpd; then
   print_row "Web server" "${C_DIM}none installed${C_RESET}"
+fi
+
+# --- Open ports ------------------------------------------------------
+section "Open ports"
+if has ss; then
+  PW1=7; PW2=22; PW3=10; PW4=26
+  tborder $PW1 $PW2 $PW3 $PW4
+  printf "  ${C_DIM}| %-${PW1}s | %-${PW2}s | %-${PW3}s | %-${PW4}s |${C_RESET}\n" "PROTO" "ADDRESS:PORT" "STATE" "PROCESS"
+  tborder $PW1 $PW2 $PW3 $PW4
+  ss_cmd=(ss -ltunpH)
+  if has sudo && sudo -n true 2>/dev/null; then ss_cmd=(sudo -n ss -ltunpH); fi
+  "${ss_cmd[@]}" 2>/dev/null | \
+  while read -r netid state _ _ local _ proc; do
+    prog=$(printf '%s' "$proc" | sed -E 's/.*users:\(\("([^"]+)".*/\1/')
+    [ -n "$prog" ] && prog=$(trunc "$prog" $PW4) || prog="-"
+    printf "  | %-${PW1}s | %-${PW2}s | %-${PW3}s | %-${PW4}s |\n" \
+      "${netid:-?}" "$(trunc "$local" $PW2)" "${state:-?}" "$prog"
+  done
+  tborder $PW1 $PW2 $PW3 $PW4
+else
+  print_row "Open ports" "${C_DIM}ss unavailable${C_RESET}"
+fi
+
+# --- Maintenance -----------------------------------------------------
+section "Maintenance"
+if [ "$updates_pending" -gt 0 ]; then
+  upcol="${C_YLW}"; [ "$updates_pending" -ge 10 ] && upcol="${C_RED}"
+  print_row "Updates"  "${upcol}${updates_pending} pending${C_RESET}"
+else
+  print_row "Updates"  "${C_GRN}up to date${C_RESET}"
+fi
+if [ "$reboot_req" = "yes" ]; then
+  print_row "Reboot" "${C_RED}required${C_RESET}"
+else
+  print_row "Reboot" "${C_GRN}not needed${C_RESET}"
+fi
+if df -x tmpfs -x devtmpfs -x overlay -x squashfs --output=target,ipcent >/dev/null 2>&1; then
+  inode_max=0; inode_top=""
+  while read -r m ip; do
+    ip=${ip%\%}
+    [[ "$ip" =~ ^[0-9]+$ ]] || continue
+    if [ "$ip" -gt "$inode_max" ]; then inode_max=$ip; inode_top=$m; fi
+  done < <(df -x tmpfs -x devtmpfs -x overlay -x squashfs --output=target,ipcent 2>/dev/null | tail -n +2)
+  if [ "$inode_max" -ge 90 ]; then
+    print_row "Inodes" "${C_RED}${inode_top} at ${inode_max}%${C_RESET}"
+  else
+    print_row "Inodes" "${C_GRN}ok (max ${inode_max}%)${C_RESET}"
+  fi
 fi
 
 # --- Development tools ----------------------------------------------
