@@ -140,12 +140,45 @@ if has docker; then
   if docker info >/dev/null 2>&1; then
     running=$(docker ps -q | wc -l)
     total=$(docker ps -aq | wc -l)
-    print_row "Containers" "${running} running / $((total)) total"
-    if [ "$running" -gt 0 ]; then
-      printf "  ${C_DIM}%-22s %-25s %-22s %s${C_RESET}\n" "Name" "Image" "Status" "Ports"
-      docker ps --format '{{printf "%-22s" .Names}} {{printf "%-25s" .Image}} {{printf "%-22s" .Status}} {{.Ports}}' \
-        | sed 's/^/  /'
+
+    # gamified health bar
+    if [ "$total" -gt 0 ]; then
+      filled=$((running * 10 / total)); [ "$filled" -gt 10 ] && filled=10
+      bfill=$(printf '%*s' "$filled" '' | tr ' ' '#')
+      brest=$(printf '%*s' $((10 - filled)) '' | tr ' ' '-')
+      if [ "$running" -eq "$total" ]; then hcol="${C_GRN}"
+      elif [ "$running" -eq 0 ]; then hcol="${C_RED}"
+      else hcol="${C_YLW}"; fi
+      print_row "Containers" "${hcol}[${bfill}${brest}]${C_RESET} ${C_BOLD}${running} up / ${total} total${C_RESET}"
     fi
+
+    trunc() { local s="$1" n="$2"; [ "${#s}" -gt "$n" ] && s="${s:0:$((n-1))}.."; printf '%s' "$s"; }
+    CW1=20; CW2=28; CW3=12
+    border="+$(printf '%*s' $((CW1+2)) '' | tr ' ' '-')+$(printf '%*s' $((CW2+2)) '' | tr ' ' '-')+$(printf '%*s' $((CW3+2)) '' | tr ' ' '-')+"
+    printf "  ${C_DIM}$border${C_RESET}\n"
+    printf "  ${C_DIM}| %-${CW1}s | %-${CW2}s | %-${CW3}s |${C_RESET}\n" "NAME" "IMAGE" "STATUS"
+    printf "  ${C_DIM}$border${C_RESET}\n"
+
+    if [ "$running" -gt 0 ]; then
+      while IFS='|' read -r cname cimage cstate cstatus; do
+        case "$cstate" in
+          running)     tag="UP";       col="${C_GRN}"; raw="${cstatus#Up }" ;;
+          paused)      tag="PAUSED";   col="${C_YLW}"; raw="" ;;
+          restarting)  tag="RESTART";  col="${C_YLW}"; raw="" ;;
+          removing)    tag="STOPPING"; col="${C_YLW}"; raw="" ;;
+          dead)        tag="DEAD";     col="${C_RED}"; raw="" ;;
+          exited)      tag="DOWN";     col="${C_RED}"; raw="" ;;
+          created)     tag="CREATED";  col="${C_BLU}"; raw="" ;;
+          *)           tag="$cstate";  col="${C_DIM}"; raw="" ;;
+        esac
+        dur=$(printf '%s' "$raw" | awk '{for(i=1;i<=NF;i++){if($i~/^[0-9]+$/){n=$i}else if($i~/^hour/){if(n=="")n="~1";printf "%sh",n}else if($i~/^minute/){if(n=="")n="~1";printf "%sm",n}else if($i~/^day/){if(n=="")n="~1";printf "%sd",n}else if($i~/^second/){if(n=="")n="~1";printf "%ss",n}}}')
+        printf "  | %-${CW1}s | %-${CW2}s | %s%-${CW3}s%s |\n" \
+          "$(trunc "$cname" $CW1)" "$(trunc "$cimage" $CW2)" "$col" "${tag}${dur:+ $dur}" "$C_RESET"
+      done < <(docker ps --format '{{.Names}}|{{.Image}}|{{.State}}|{{.Status}}')
+    else
+      printf "  ${C_DIM}no containers running${C_RESET}\n"
+    fi
+    printf "  ${C_DIM}$border${C_RESET}\n"
   else
     print_row "Engine" "${C_RED}daemon not running or no permission${C_RESET}"
   fi
