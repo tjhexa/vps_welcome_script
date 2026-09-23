@@ -22,6 +22,36 @@ pub enum DiffKind {
     RcRemove(Vec<RcEditPlan>),
 }
 
+/// Stronger text contrast than the stock egui palettes, which look washed out:
+/// near-black text in light mode, brighter white in dark mode. In egui 0.31 the
+/// text color for a given element comes from its widget state's `fg_stroke`
+/// (body/labels = `noninteractive`, buttons/checkboxes = `inactive`,
+/// headings/hovered/selected = `active`/`hovered`), so we push each of those.
+fn apply_theme_visuals(ctx: &Context, theme: Theme) {
+    let mut visuals = match theme {
+        Theme::Dark => egui::Visuals::dark(),
+        Theme::Light => egui::Visuals::light(),
+    };
+    let (text, button, strong): (Color32, Color32, Color32) = match theme {
+        Theme::Light => (
+            Color32::from_gray(15), // body / labels
+            Color32::from_gray(20), // buttons, checkboxes
+            Color32::BLACK,         // headings, hovered / selected text
+        ),
+        Theme::Dark => (
+            Color32::from_gray(235), // body / labels
+            Color32::from_gray(220), // buttons, checkboxes
+            Color32::WHITE,          // headings, hovered / selected text
+        ),
+    };
+    visuals.widgets.noninteractive.fg_stroke.color = text;
+    visuals.widgets.inactive.fg_stroke.color = button;
+    visuals.widgets.hovered.fg_stroke.color = strong;
+    visuals.widgets.active.fg_stroke.color = strong;
+    visuals.widgets.open.fg_stroke.color = strong;
+    ctx.set_visuals(visuals);
+}
+
 pub struct App {
     pub settings: Settings,
     pub history: History,
@@ -40,11 +70,6 @@ pub struct App {
     pub new_profile_name: String,
     pub preset_pending: Option<fn() -> crate::settings::Sections>,
     pub profile_json_path: String,
-    pub pending_screenshot: bool,
-    pub wizard_step: usize,
-    pub wizard_purpose: usize,
-    pub wizard_draft: crate::settings::Sections,
-    pub welcome: bool,
 }
 
 impl App {
@@ -52,15 +77,11 @@ impl App {
         install_fonts(&cc.egui_ctx);
         let settings = gui.current_settings();
         let theme = settings.theme;
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        if theme == Theme::Light {
-            cc.egui_ctx.set_visuals(egui::Visuals::light());
-        }
+        apply_theme_visuals(&cc.egui_ctx, theme);
         let active_tab = gui.active_tab.unwrap_or(Tab::Settings);
         let history = History::new(settings.clone());
         let rc_files = rc::candidates();
         let last_snapshot = settings.clone();
-        let welcome = !gui.first_run_dismissed;
         Self {
             settings,
             history,
@@ -79,11 +100,6 @@ impl App {
             new_profile_name: String::new(),
             preset_pending: None,
             profile_json_path: settings::expand_tilde("~/.config/vpsinfo/profile.json"),
-            pending_screenshot: false,
-            wizard_step: 0,
-            wizard_purpose: 0,
-            wizard_draft: settings::Sections::docker_host(),
-            welcome,
         }
     }
 
@@ -95,10 +111,7 @@ impl App {
 
     fn set_visuals_for_theme(&mut self, ctx: &Context) {
         if self.applied_theme != Some(self.settings.theme) {
-            match self.settings.theme {
-                Theme::Dark => ctx.set_visuals(egui::Visuals::dark()),
-                Theme::Light => ctx.set_visuals(egui::Visuals::light()),
-            }
+            apply_theme_visuals(ctx, self.settings.theme);
             self.applied_theme = Some(self.settings.theme);
         }
     }
@@ -388,7 +401,7 @@ impl App {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                for tab in [Tab::Settings, Tab::Preview, Tab::RcManager, Tab::About, Tab::Wizard] {
+                for tab in [Tab::Settings, Tab::Preview, Tab::RcManager, Tab::About] {
                     if ui.selectable_label(self.active_tab == tab, tab.label()).clicked() {
                         self.active_tab = tab;
                     }
@@ -429,7 +442,6 @@ impl App {
             Tab::Preview => self.preview_ui(ui),
             Tab::RcManager => self.rc_ui(ui),
             Tab::About => self.about_ui(ui),
-            Tab::Wizard => self.wizard_ui(ui),
         });
 
         if self.show_help {
@@ -439,28 +451,6 @@ impl App {
             self.about_window(ctx);
         }
         self.diff_window(ctx);
-
-        // V14: screenshot-to-PNG (request once, save when the event arrives)
-        if self.pending_screenshot {
-            self.pending_screenshot = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-        }
-        ctx.input(|i| {
-            for ev in &i.events {
-                if let egui::Event::Screenshot { image, .. } = ev {
-                    if let Some(p) = self.save_screenshot(&image) {
-                        self.set_status(preview::GREEN, format!("preview saved to {p} (path copied to clipboard)"));
-                        ctx.copy_text(p.clone());
-                    } else {
-                        self.set_status(preview::RED, "could not write preview PNG");
-                    }
-                }
-            }
-        });
-
-        if self.welcome {
-            self.first_run_window(ctx);
-        }
 
         // history recording + persistence
         if self.suppress_history {
@@ -742,65 +732,6 @@ impl App {
         }
     }
 
-    /// V14 (#30): save the window screenshot as PNG (path returned for status).
-    fn save_screenshot(&self, img: &egui::ColorImage) -> Option<String> {
-        let (w, h) = (img.size[0], img.size[1]);
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let mut rgb = Vec::with_capacity(w * h * 3);
-        for p in img.pixels.iter() {
-            rgb.extend_from_slice(&[p.r(), p.g(), p.b()]);
-        }
-        let buf = image::RgbImage::from_raw(w as u32, h as u32, rgb)?;
-        let path = settings::expand_tilde("~/.config/vpsinfo/preview.png");
-        if let Some(dir) = std::path::Path::new(&path).parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        buf.save(&path).ok()?;
-        Some(path)
-    }
-
-    /// V7 (#26): one-time welcome popup with a “don't show again” checkbox.
-    /// `self.welcome` is the window's real open-state; Get started / the X
-    /// close it for the session, and the checkbox decides future launches.
-    fn first_run_window(&mut self, ctx: &Context) {
-        let mut open = self.welcome;
-        let mut got_started = false;
-        let mut dont = false;
-        egui::Window::new("Welcome to vpsinfo-gui")
-            .id(egui::Id::new("welcome"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(460.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
-            .show(ctx, |ui| {
-                ui.heading("Welcome to vpsinfo-gui");
-                ui.add_space(4.0);
-                ui.label("A one-stop switcher for the vps-info login banner: ");
-                ui.label("• toggle the 15 sections, colors and frame on the Settings tab");
-                ui.label("• Preview shows a live mock and can run the real script");
-                ui.label("• rc Manager installs/removes the SSH-login hook safely");
-                ui.label("• Generate config / Export baked script at any time");
-                ui.add_space(8.0);
-                ui.label(RichText::new("Tip: pick a preset (e.g. Docker-host) to start from a sensible section set.").weak());
-                ui.add_space(8.0);
-                ui.checkbox(&mut dont, "Don't show this again");
-                ui.add_space(4.0);
-                if ui.button(RichText::new("Get started").strong()).clicked() {
-                    got_started = true;
-                }
-            });
-        let (keep_open, dismissed) =
-            settings::welcome_decision(open, got_started, dont, self.gui.first_run_dismissed);
-        if !keep_open {
-            self.welcome = false;
-            self.gui.first_run_dismissed = dismissed;
-            self.gui.save();
-        }
-    }
-
     fn color_mode_combo(&mut self, ui: &mut egui::Ui) {
         ComboBox::from_id_salt("color")
             .selected_text(match self.settings.color {
@@ -888,14 +819,6 @@ impl App {
             if ui.small_button("100%").on_hover_text("Ctrl+0").clicked() {
                 self.gui.preview_font_size = 13.0;
                 self.gui.save();
-            }
-            ui.separator();
-            if ui
-                .button("Save PNG")
-                .on_hover_text("Screenshot the window to ~/.config/vpsinfo/preview.png and copy the path")
-                .clicked()
-            {
-                self.pending_screenshot = true;
             }
         });
 
@@ -1239,137 +1162,7 @@ impl App {
             self.diff = None;
         }
     }
-
-    // ---------------------------------------------------------------- wizard (#24)
-
-    fn wizard_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Setup wizard");
-        ui.label(
-            RichText::new("Three steps: pick a purpose, trim the sections, confirm — then finish on the Settings tab.")
-                .weak(),
-        );
-        ui.add_space(6.0);
-        // Clickable step tabs — jump straight to any step.
-        ui.horizontal(|ui| {
-            for (i, name) in ["1 · Purpose", "2 · Sections", "3 · Confirm"].iter().enumerate() {
-                if ui.selectable_label(self.wizard_step == i, *name).clicked() {
-                    self.wizard_step = i;
-                }
-            }
-        });
-        ui.separator();
-        // Scroll the step body so the nav buttons below stay visible even
-        // when the Sections grid is tall.
-        ScrollArea::vertical()
-            .id_salt("wizard_body")
-            .auto_shrink([false, false])
-            .show(ui, |ui| match self.wizard_step {
-                0 => self.wizard_purpose_ui(ui),
-                1 => self.wizard_sections_ui(ui),
-                _ => self.wizard_confirm_ui(ui),
-            });
-        ui.add_space(10.0);
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    settings::wizard_back_enabled(self.wizard_step),
-                    egui::Button::new("Back"),
-                )
-                .clicked()
-            {
-                self.wizard_step -= 1;
-            }
-            let last = self.wizard_step == 2;
-            let label = if last { "Apply & go to Settings" } else { "Next" };
-            if ui
-                .add_enabled(
-                    settings::wizard_next_enabled(self.wizard_step),
-                    egui::Button::new(RichText::new(label).strong()),
-                )
-                .clicked()
-            {
-                if last {
-                    self.settings.sections = self.wizard_draft.clone();
-                    self.active_tab = Tab::Settings;
-                    self.set_status(preview::GREEN, "wizard applied to the current profile");
-                } else {
-                    self.wizard_step += 1;
-                }
-            }
-        });
-    }
-
-    fn wizard_purpose_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("What kind of machine is this?");
-        ui.add_space(4.0);
-        for (i, (name, desc, f)) in WIZARD_PURPOSES.iter().enumerate() {
-            if ui
-                .selectable_label(self.wizard_purpose == i, format!("{name} — {desc}"))
-                .clicked()
-            {
-                self.wizard_purpose = i;
-                self.wizard_draft = f();
-            }
-        }
-        ui.add_space(4.0);
-        ui.label(RichText::new("(every section is adjustable on the next step)").weak());
-    }
-
-    fn wizard_sections_ui(&mut self, ui: &mut egui::Ui) {
-        let (name, _, _) = WIZARD_PURPOSES[self.wizard_purpose];
-        ui.label(RichText::new(format!("Trim the “{name}” preset to taste — the preview below updates live.")).weak());
-        ui.add_space(6.0);
-        // The outer wizard ScrollArea handles overflow; render the grid inline.
-        sections_grid(ui, &mut self.wizard_draft);
-        ui.add_space(8.0);
-        let lines = preview::build_mock(&self.wizard_draft, false);
-        let job = preview::lines_to_job(&lines, 12.0);
-        egui::Frame::group(ui.style())
-            .inner_margin(6.0)
-            .show(ui, |ui| {
-                ui.add(egui::Label::new(job));
-            });
-    }
-
-    fn wizard_confirm_ui(&mut self, ui: &mut egui::Ui) {
-        let (name, desc, _) = WIZARD_PURPOSES[self.wizard_purpose];
-        ui.label(RichText::new(format!("Purpose: {name}")).strong());
-        ui.label(RichText::new(desc).weak());
-        ui.add_space(6.0);
-        let mut n = 0usize;
-        let mut names: Vec<&str> = Vec::new();
-        for (label, _, get, _) in settings::SECTION_ENTRIES.iter() {
-            if *get(&self.wizard_draft) {
-                n += 1;
-                names.push(label);
-            }
-        }
-        ui.label(format!("{n} of 15 sections enabled."));
-        if !names.is_empty() {
-            ui.add(egui::Label::new(RichText::new(names.join(", ")).weak()).wrap());
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label("Result preview:");
-        let lines = preview::build_mock(&self.wizard_draft, false);
-        let job = preview::lines_to_job(&lines, 12.0);
-        egui::Frame::group(ui.style())
-            .inner_margin(6.0)
-            .show(ui, |ui| {
-                ui.add(egui::Label::new(job));
-            });
-    }
 }
-
-const WIZARD_PURPOSES: &[(&str, &str, fn() -> crate::settings::Sections)] = &[
-    ("Docker host", "container boxes: docker + ports + security emphasized", crate::settings::Sections::docker_host),
-    ("VPS", "production server: ports + security, no dev-tools", crate::settings::Sections::vps_only),
-    ("Desktop workstation", "local machine: no docker/web/ports/security", crate::settings::Sections::desktop_only),
-    ("Dev box", "tooling + system stats only", crate::settings::Sections::dev_box),
-    ("Server (minimal)", "system, disk, network, maintenance", crate::settings::Sections::server_minimal),
-    ("Everything on", "all 15 sections", crate::settings::Sections::desktop_full),
-];
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
@@ -1454,7 +1247,7 @@ fn swatch(ui: &mut egui::Ui, color: Color32, text: &str) {
     });
 }
 
-/// The 15-section toggle grid, reusable on any draft (settings or wizard).
+/// The 15-section toggle grid, used by the Settings pane.
 fn sections_grid(ui: &mut egui::Ui, s: &mut settings::Sections) {
     egui::Grid::new("sections")
         .num_columns(2)

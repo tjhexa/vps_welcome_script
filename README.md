@@ -119,7 +119,7 @@ bash tests/run_tests.sh          # bash-side regression suite (run from repo roo
 cd gui
 cargo build                      # debug build  -> gui/target/debug/vpsinfo-gui
 cargo run                        # debug run
-cargo test                       # unit tests (settings, wizard, welcome popup, …)
+cargo test                       # unit tests
 cargo clippy --all-targets       # lints
 cargo fmt --check                # formatting
 cargo build --release            # optimized + stripped -> gui/target/release/vpsinfo-gui
@@ -174,17 +174,16 @@ cargo build --release       # binary: gui/target/release/vpsinfo-gui
 cargo run --release
 ```
 
-The GUI has five tabs:
+The GUI has four tabs:
 
 | Tab | What it does |
 | --- | --- |
-| **Wizard** | 3-step setup for first-timers: pick a purpose (Docker host / VPS / desktop / dev box / minimal / everything), trim the sections with a live preview, confirm — then finish on Settings. |
 | **Settings** | 15 section toggles, color mode (auto/always/never), frame, CPU sample / updates / public IP / geo, ssh-only guard, theme, presets + named profiles, JSON import/export of any profile, reset-to-defaults. Groups collapse to keep it short. Undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`). **Autodetects an existing `vpsinfo.conf` on first launch.** |
-| **Preview** | Live mock banner that reacts to every toggle (green/yellow/red colour strip, zoomable), plus **Run real preview** (`Ctrl+Enter`) which actually executes the script with your settings (8s timeout, network off). Warns if the banner is wider than 80 columns. **Save PNG** screenshots the window for issue reports. |
+| **Preview** | Live mock banner that reacts to every toggle (green/yellow/red colour strip, zoomable), plus **Run real preview** (`Ctrl+Enter`) which actually executes the script with your settings (8s timeout, network off). Warns if the banner is wider than 80 columns. |
 | **rc Manager** | Tick `~/.bashrc` / `~/.zshrc` / `~/.profile` … to add or remove the hook. Shows live `sourced` badges, an exact rc-block preview, a green/red diff before applying, a one-click restore list of the rotating backups (`*.vpsinfo.bak.1..4`), and **Install system-wide** / **Remove system-wide** (sudo: `/usr/local/bin` + `/etc/profile.d`). |
 | **About** | Copy-install-snippet (with your real script path), config-path copy, attribution, shortcuts. |
 
-**Shortcuts:** `Ctrl+S` write config · `Ctrl+Enter` real preview · `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `Ctrl+=` / `Ctrl+-` / `Ctrl+0` preview zoom · `?` shortcuts & help. A one-time welcome popup greets first-timers.
+**Shortcuts:** `Ctrl+S` write config · `Ctrl+Enter` real preview · `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `Ctrl+=` / `Ctrl+-` / `Ctrl+0` preview zoom · `?` shortcuts & help.
 
 ### Headless CLI (same binary)
 

@@ -62,7 +62,6 @@ pub enum Tab {
     Preview,
     RcManager,
     About,
-    Wizard,
 }
 
 impl Tab {
@@ -72,7 +71,6 @@ impl Tab {
             Tab::Preview => "Preview",
             Tab::RcManager => "rc Manager",
             Tab::About => "About",
-            Tab::Wizard => "Wizard",
         }
     }
 }
@@ -494,8 +492,6 @@ pub struct GuiState {
     pub collapsed: CollapsedGroups,
     #[serde(default = "default_preview_font_size")]
     pub preview_font_size: f32,
-    #[serde(default)]
-    pub first_run_dismissed: bool,
 }
 
 fn default_preview_font_size() -> f32 {
@@ -511,7 +507,6 @@ impl Default for GuiState {
             active_tab: None,
             collapsed: CollapsedGroups::default(),
             preview_font_size: default_preview_font_size(),
-            first_run_dismissed: false,
         };
         s.profiles.insert("Default".into(), Settings::default());
         s
@@ -558,70 +553,5 @@ impl GuiState {
             .get(&self.current_profile)
             .cloned()
             .unwrap_or_default()
-    }
-}
-/// First-run welcome window state machine (V7 #26).
-/// Returns `(keep_open, first_run_dismissed)`.
-/// Get started or the X button close the window *now*; the "don't show
-/// again" checkbox only decides whether it reappears on the next launch.
-pub fn welcome_decision(open: bool, got_started: bool, dont: bool, was_dismissed: bool) -> (bool, bool) {
-    if !open || got_started {
-        (false, dont)
-    } else {
-        (true, was_dismissed)
-    }
-}
-
-/// Wizard nav enablement (#24). Next is enabled on steps 0 and 1; on the
-/// last step (2) the button becomes "Apply". Back is enabled from step 1 on.
-pub fn wizard_next_enabled(step: usize) -> bool {
-    step < 2
-}
-pub fn wizard_back_enabled(step: usize) -> bool {
-    step > 0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{welcome_decision, wizard_back_enabled, wizard_next_enabled};
-
-    #[test]
-    fn get_started_without_checkbox_closes_now() {
-        // Regression: prior code kept the window open forever when the
-        // "don't show again" checkbox was left unticked.
-        assert_eq!(welcome_decision(true, true, false, false), (false, false));
-    }
-
-    #[test]
-    fn get_started_with_checkbox_dismisses_forever() {
-        assert_eq!(welcome_decision(true, true, true, false), (false, true));
-    }
-
-    #[test]
-    fn close_button_uses_checkbox_state() {
-        assert_eq!(welcome_decision(false, false, false, false), (false, false));
-        assert_eq!(welcome_decision(false, false, true, false), (false, true));
-    }
-
-    #[test]
-    fn still_open_keeps_state() {
-        assert_eq!(welcome_decision(true, false, false, false), (true, false));
-        assert_eq!(welcome_decision(true, false, true, true), (true, true));
-    }
-
-    #[test]
-    fn wizard_next_enabled_on_step_0() {
-        // Regression: the next button used to be disabled on the very first
-        // step, so the wizard could never leave "1 · Purpose".
-        assert!(wizard_next_enabled(0));
-        assert!(wizard_next_enabled(1));
-        assert!(!wizard_next_enabled(2)); // becomes "Apply & go to Settings"
-    }
-
-    #[test]
-    fn wizard_back_only_from_later_steps() {
-        assert!(!wizard_back_enabled(0));
-        assert!(wizard_back_enabled(1));
-        assert!(wizard_back_enabled(2));
     }
 }

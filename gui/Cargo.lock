@@ -3159,7 +3159,6 @@ version = "0.2.0"
 dependencies = [
  "dirs",
  "eframe",
- "image",
  "serde",
  "serde_json",
 ]
