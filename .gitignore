@@ -1,5 +1,7 @@
-# local planning doc (not meant for the repo)
+# local planning docs (not meant for the repo)
 PLAN.md
+GUI-SUGGESTIONS.md
+TASKS.md
 
 # rust build output (gui/)
 target/
