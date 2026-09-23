@@ -19,8 +19,48 @@ checks_total=0
 if date -d @0 +%3N >/dev/null 2>&1; then now_ms() { date +%s%3N; }; else now_ms() { date +%s; }; fi
 _start_ms=$(now_ms)
 
-# --- Colors (only when safe: real terminal, sane TERM, NO_COLOR unset) --
-if [ "$TTY_OK" = "1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+# --- Config loader ----------------------------------------------------
+# Reads $VPSINFO_CONF or ~/.config/vpsinfo/vpsinfo.conf (whitelisted
+# KEY=VALUE lines). Environment variables always win over the file.
+# VPSINFO_NO_CONFIG=1 skips the file entirely — baked/standalone exports
+# set it so a stale config can never alter a baked script.
+if [ -z "${VPSINFO_NO_CONFIG:-}" ]; then
+  for _cf in "${VPSINFO_CONF:-}" "${HOME:-}/.config/vpsinfo/vpsinfo.conf"; do
+    [ -z "$_cf" ] && continue
+    [ -f "$_cf" ] || continue
+    while IFS='=' read -r _k _v; do
+      # trim leading/trailing whitespace (bash-3-safe, no extglob)
+      _k="${_k#"${_k%%[![:space:]]*}"}"; _k="${_k%"${_k##*[![:space:]]}"}"
+      _v="${_v#"${_v%%[![:space:]]*}"}"; _v="${_v%"${_v##*[![:space:]]}"}"
+      case "$_k" in
+        VPSINFO_SHOW_*|VPSINFO_FRAME|VPSINFO_COLOR|VPSINFO_SKIP_*|NO_PUBLIC_IP)
+          case "$_v" in *[!A-Za-z0-9_]*) continue ;; esac   # token values only
+          [ -z "${!_k+x}" ] && eval "$_k=\$_v"               # env wins
+          ;;
+      esac
+    done < "$_cf"
+  done
+fi
+
+# flag_on NAME [default] — truthy (1/on/yes/…) → exit 0, falsy (0/off/no) → exit 1
+flag_on() {
+  local _v="${2:-1}"
+  [ -n "${!1+x}" ] && _v="${!1}"
+  case "$_v" in
+    0|off|false|no|n) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# --- Colors (VPSINFO_COLOR=auto|always|never; NO_COLOR & TERM=dumb respected in auto) --
+VPSINFO_COLOR=${VPSINFO_COLOR:-auto}
+color_on=0
+case "$VPSINFO_COLOR" in
+  always) color_on=1 ;;
+  never)  color_on=0 ;;
+  *) [ "$TTY_OK" = "1" ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ] && color_on=1 ;;
+esac
+if [ "$color_on" = "1" ]; then
   ESC=$(printf '\033')
   C_RESET="${ESC}[0m"; C_BOLD="${ESC}[1m"
   C_CYA="${ESC}[36m"; C_GRN="${ESC}[32m"; C_YLW="${ESC}[33m"; C_RED="${ESC}[31m"; C_BLU="${ESC}[34m"
@@ -43,7 +83,7 @@ cpu_usage() {
     prev_idle=$idle; prev_total=$total
     break
   done < /proc/stat
-  [ -n "${VPSINFO_SKIP_CPU:-}" ] && { echo "-"; return; }
+  if flag_on VPSINFO_SKIP_CPU 0; then echo "-"; return; fi
   sleep 0.2
   while read -r _ a b c d e f g h i j k; do
     idle=$((d + e)); total=$((a + b + c + idle + f + g + h + i + j + k))
@@ -57,7 +97,11 @@ pre_scan() {
   nproc=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
   cpu_cores=$(grep -c '^processor' /proc/cpuinfo)
 
-  CPU_PCT=$(cpu_usage)
+  if flag_on VPSINFO_SHOW_CPU 1 || flag_on VPSINFO_SHOW_SUMMARY 1; then
+    CPU_PCT=$(cpu_usage)
+  else
+    CPU_PCT="-"
+  fi
 
   mem_total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
   mem_avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
@@ -75,22 +119,26 @@ pre_scan() {
   reboot_req="no"; [ -f /var/run/reboot-required ] && reboot_req="yes"
 
   updates_pending=0
-  if [ -z "${VPSINFO_SKIP_UPDATES:-}" ]; then
-    if [ -r /var/lib/update-notifier/updates-available ]; then
-      updates_pending=$(grep -m1 -E '^[0-9]+ updates? can be applied' /var/lib/update-notifier/updates-available 2>/dev/null | awk '{print $1}')
-      [[ "$updates_pending" =~ ^[0-9]+$ ]] || updates_pending=0
-    elif has apt; then
-      updates_pending=$(apt list --upgradable 2>/dev/null | sed -n '2,$p' | grep -c . || true)
-    elif has dnf; then
-      updates_pending=$(dnf -q check-update 2>/dev/null | grep -vc '^$' || true)
+  if flag_on VPSINFO_SHOW_MAINT 1 || flag_on VPSINFO_SHOW_BANNER 1; then
+    if ! flag_on VPSINFO_SKIP_UPDATES 0; then
+      if [ -r /var/lib/update-notifier/updates-available ]; then
+        updates_pending=$(grep -m1 -E '^[0-9]+ updates? can be applied' /var/lib/update-notifier/updates-available 2>/dev/null | awk '{print $1}')
+        [[ "$updates_pending" =~ ^[0-9]+$ ]] || updates_pending=0
+      elif has apt; then
+        updates_pending=$(apt list --upgradable 2>/dev/null | sed -n '2,$p' | grep -c . || true)
+      elif has dnf; then
+        updates_pending=$(dnf -q check-update 2>/dev/null | grep -vc '^$' || true)
+      fi
     fi
   fi
 
   docker_ok=0; docker_running_ct=0; docker_total_ct=0
-  if has docker && docker info >/dev/null 2>&1; then
-    docker_ok=1
-    docker_running_ct=$(docker ps -q | wc -l)
-    docker_total_ct=$(docker ps -aq | wc -l)
+  if flag_on VPSINFO_SHOW_DOCKER 1 || flag_on VPSINFO_SHOW_SUMMARY 1 || flag_on VPSINFO_SHOW_BANNER 1; then
+    if has docker && docker info >/dev/null 2>&1; then
+      docker_ok=1
+      docker_running_ct=$(docker ps -q | wc -l)
+      docker_total_ct=$(docker ps -aq | wc -l)
+    fi
   fi
 
   disk_worst=0; disk_warn_n=0; disk_warns=""
@@ -141,6 +189,7 @@ printf "${C_BOLD}%s${C_RESET}\n" "VPS / SYSTEM INFO - $(date +'%a %b %d %H:%M')"
 echo
 
 # --- summary bar -----------------------------------------------------
+if flag_on VPSINFO_SHOW_SUMMARY 1; then
 if [[ "$CPU_PCT" =~ ^[0-9]+$ ]]; then
   [ "$CPU_PCT" -ge 80 ] && cpuc="${C_RED}" || { [ "$CPU_PCT" -ge 60 ] && cpuc="${C_YLW}" || cpuc="${C_GRN}"; }
 else cpuc="${C_DIM}"; fi
@@ -153,9 +202,11 @@ if [ "$docker_ok" = "1" ]; then
 fi
 sum="$sum | load ${C_DIM}${load1}${C_RESET}"
 printf "  ${C_BOLD}%s${C_RESET}\n" "$sum"
+fi
 echo
 
 # --- health banner ---------------------------------------------------
+if flag_on VPSINFO_SHOW_BANNER 1; then
 issues=()
 add_issue() { issues+=("$1"); }
 [ "$MEM_PCT" -ge 80 ] && add_issue "memory ${MEM_PCT}%"
@@ -176,9 +227,11 @@ if [ "${#issues[@]}" -gt 0 ]; then
 else
   printf "  ${C_GRN}[+] all systems nominal${C_RESET}\n"
 fi
+fi
 echo
 
 # --- System ----------------------------------------------------------
+if flag_on VPSINFO_SHOW_SYSTEM 1; then
 HOST=$(hostname -f 2>/dev/null || hostname)
 print_row "Hostname"    "$(hostname) ${C_DIM}($HOST)${C_RESET}"
 print_row "User"        "$USER @ $(logname 2>/dev/null || echo '-')"
@@ -200,8 +253,10 @@ up=$(printf "%.0f" "${up%.*}")
 days=$((up / 86400)); hrs=$(((up % 86400) / 3600)); mins=$(((up % 3600) / 60))
 print_row "Uptime"      "${days}d ${hrs}h ${mins}m"
 print_row "Load (1/5/15)" "$(cut -d' ' -f1-3 /proc/loadavg)"
+fi
 
 # --- CPU -------------------------------------------------------------
+if flag_on VPSINFO_SHOW_CPU 1; then
 cpu_model=$(grep -m1 "model name" /proc/cpuinfo | sed 's/.*: *//')
 print_row "CPU"         "${cpu_model:-unknown}"
 print_row "Cores"       "${cpu_cores} (${C_DIM}${nproc} online${C_RESET})"
@@ -211,16 +266,20 @@ else
   cpuc="${C_GRN}"; [ "$CPU_PCT" -ge 80 ] && cpuc="${C_RED}" || [ "$CPU_PCT" -ge 60 ] && cpuc="${C_YLW}"
   print_row "CPU usage" "${cpuc}${CPU_PCT}%${C_RESET} ${C_DIM}(0.2s sample)${C_RESET}"
 fi
+fi
 
 # --- Memory ----------------------------------------------------------
+if flag_on VPSINFO_SHOW_MEMORY 1; then
 mem_info() { awk -F': *' -v key="$1" '$0 ~ key {gsub(/kB/,""); print $2}' /proc/meminfo; }
 [ "$MEM_PCT" -ge 80 ] && mcol="${C_RED}" || { [ "$MEM_PCT" -ge 60 ] && mcol="${C_YLW}" || mcol="${C_GRN}"; }
 print_row "Memory"      "${mcol}${MEM_PCT}%${C_RESET} used  $((mem_used / 1024)) MB / $((mem_total / 1024)) MB"
 swap_total=$(mem_info '^SwapTotal'); swap_free=$(mem_info '^SwapFree')
 swap_used=$((swap_total - swap_free))
 print_row "Swap"        "$((swap_used / 1024)) MB / $((swap_total / 1024)) MB"
+fi
 
 # --- Disk ------------------------------------------------------------
+if flag_on VPSINFO_SHOW_DISK 1; then
 section "Disk"
 if df -h -x tmpfs -x devtmpfs -x overlay -x squashfs --output=source,target,size,used,pcent >/dev/null 2>&1; then
   DW1=25; DW2=14; DW3=6; DW4=6; DW5=6
@@ -241,8 +300,10 @@ if df -h -x tmpfs -x devtmpfs -x overlay -x squashfs --output=source,target,size
 else
   df -h -x tmpfs -x devtmpfs -x overlay -x squashfs | head -8
 fi
+fi
 
 # --- Network ---------------------------------------------------------
+if flag_on VPSINFO_SHOW_NETWORK 1; then
 lan=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -1)
 [ -n "$lan" ] && print_row "LAN IP" "${lan}"
 
@@ -251,7 +312,7 @@ dns=$(grep -hE '^nameserver[[:space:]]+' /etc/resolv.conf 2>/dev/null | awk '{pr
 
 NET_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/vpsinfo-net"
 NET_SRC="n/a"
-if [ -n "${NO_PUBLIC_IP:-}" ]; then
+if flag_on NO_PUBLIC_IP 0; then
   print_row "Public IP" "${C_DIM}skipped (NO_PUBLIC_IP=1)${C_RESET}"
 elif has curl; then
   now=$(date +%s)
@@ -264,7 +325,7 @@ elif has curl; then
     pub=$(curl -4 -s --max-time 3 https://ifconfig.me 2>/dev/null)
     [ -z "$pub" ] && pub=$(curl -6 -s --max-time 3 https://ifconfig.me 2>/dev/null)
     if [ -n "$pub" ]; then
-      if [ -z "${VPSINFO_SKIP_GEO:-}" ]; then
+      if ! flag_on VPSINFO_SKIP_GEO 0; then
         gj=$(curl -s --max-time 4 "https://ipinfo.io/${pub}/json" 2>/dev/null)
         city=$(printf '%s' "$gj" | sed -n 's/.*"city":[[:space:]]*"\([^"]*\)".*/\1/p')
         region=$(printf '%s' "$gj" | sed -n 's/.*"region":[[:space:]]*"\([^"]*\)".*/\1/p')
@@ -290,8 +351,10 @@ elif has curl; then
 else
   print_row "Public IP" "${C_DIM}curl not installed${C_RESET}"
 fi
+fi
 
 # --- Processes / users ----------------------------------------------
+if flag_on VPSINFO_SHOW_PROCESSES 1; then
 print_row "Processes"   "$(ps -e --no-headers 2>/dev/null | wc -l) running"
 who_qty=$(who 2>/dev/null | wc -l)
 print_row "Logged-in"   "$who_qty session(s)"
@@ -308,12 +371,14 @@ if has systemctl; then
     print_row "Failed srvcs" "${C_GRN}none${C_RESET}"
   fi
 fi
+fi
 
 # ======================================================================
 #  EXTRA SECTIONS (docker / web server / dev tools)
 # ======================================================================
 
 # --- Docker ----------------------------------------------------------
+if flag_on VPSINFO_SHOW_DOCKER 1; then
 section "Docker"
 if has docker; then
   print_row "Docker" "client $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
@@ -364,8 +429,10 @@ if has docker; then
 else
   print_row "Docker" "${C_DIM}not installed${C_RESET}"
 fi
+fi
 
 # --- Web server (nginx / apache) -------------------------------------
+if flag_on VPSINFO_SHOW_WEB 1; then
 section "Web server"
 nginx_sites() {
   local files=() cfg
@@ -428,8 +495,10 @@ fi
 if ! has nginx && ! has apache2 && ! has httpd; then
   print_row "Web server" "${C_DIM}none installed${C_RESET}"
 fi
+fi
 
 # --- Open ports ------------------------------------------------------
+if flag_on VPSINFO_SHOW_PORTS 1; then
 section "Open ports"
 if has ss; then
   PW1=7; PW2=22; PW3=10; PW4=26
@@ -450,8 +519,10 @@ if has ss; then
 else
   print_row "Open ports" "${C_DIM}ss unavailable${C_RESET}"
 fi
+fi
 
 # --- Security (fail2ban shown only when installed) -------------------
+if flag_on VPSINFO_SHOW_SECURITY 1; then
 if has fail2ban-client; then
   section "Security"
   if has systemctl; then
@@ -506,8 +577,10 @@ if has fail2ban-client; then
     checks_total=$((checks_total + 1))
   fi
 fi
+fi
 
 # --- Maintenance -----------------------------------------------------
+if flag_on VPSINFO_SHOW_MAINT 1; then
 section "Maintenance"
 if [ "$updates_pending" -gt 0 ]; then
   upcol="${C_YLW}"; [ "$updates_pending" -ge 10 ] && upcol="${C_RED}"
@@ -533,8 +606,10 @@ if df -x tmpfs -x devtmpfs -x overlay -x squashfs --output=target,ipcent >/dev/n
     print_row "Inodes" "${C_GRN}ok (max ${inode_max}%)${C_RESET}"
   fi
 fi
+fi
 
 # --- Development tools ----------------------------------------------
+if flag_on VPSINFO_SHOW_TOOLS 1; then
 section "Dev tools"
 tools=(
   "node:node --version"
@@ -567,15 +642,18 @@ for entry in "${tools[@]}"; do
     printf "  %-10s ${C_DIM}not installed${C_RESET}\n" "$name"
   fi
 done
+fi
 
 # --- footer ----------------------------------------------------------
+if flag_on VPSINFO_SHOW_FOOTER 1; then
 el_ms=$(( $(now_ms) - _start_ms ))
 if [ "$_start_ms" -lt 1000000000 ]; then el_txt="${el_ms}s"
 else el_txt=$(awk -v ms="$el_ms" 'BEGIN{printf "%.1fs", ms/1000}'); fi
 printf "  ${C_GRN}[+]${C_RESET} %s checks retrieved - %s - public IP: ${C_DIM}%s${C_RESET}\n" \
   "$checks_total" "$el_txt" "${NET_SRC:-n/a}"
 echo
+fi
 } > "$OUTTMP" 2>/dev/null   # ---------- framed body ends ----------
 
-frame "$OUTTMP"
+if flag_on VPSINFO_FRAME 1; then frame "$OUTTMP"; else cat "$OUTTMP"; fi
 rm -f "$OUTTMP"
