@@ -25,7 +25,9 @@ permissions:
 jobs:
   build-linux:
     name: Build vpsinfo-gui (Linux)
-    runs-on: ubuntu-latest
+    # Pin the runner (not ubuntu-latest): the label migrates to Ubuntu 26 in
+    # Oct 2026, and we only use the host for the runner + container anyway.
+    runs-on: ubuntu-24.04
     # Build inside an old-but-still-supported container so the binary links
     # against an older glibc (a fresh runner image would give a much newer
     # one). Ubuntu 22.04 (jammy) => glibc 2.35, in standard support until
@@ -33,6 +35,12 @@ jobs:
     # it here). The result then runs on anything Debian 12+ / Ubuntu 22.04+.
     container:
       image: ubuntu:22.04
+    defaults:
+      run:
+        # Steps inside a `container` job run with the container's default
+        # shell (/bin/sh), where `set -o pipefail` is illegal and ${VAR::8}
+        # doesn't parse. Force bash so the scripts below behave as written.
+        shell: bash
     steps:
       - name: Base tooling for the container
         run: |
@@ -41,7 +49,7 @@ jobs:
             git ca-certificates curl pkg-config build-essential
 
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install eframe/egui Linux libraries
         # Same package set the egui project uses for its own Linux CI
@@ -100,14 +108,14 @@ jobs:
           ls -lh artifacts
 
       - name: Upload artifacts (every run)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vpsinfo-gui-${{ steps.version.outputs.version }}-linux-x86_64
           path: artifacts/
 
       - name: Publish GitHub Release (version tags only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: v${{ steps.version.outputs.version }}
           tag_name: ${{ github.ref_name }}

@@ -1,6 +1,6 @@
 [package]
 name = "vpsinfo-gui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "GUI + CLI for configuring vps-info.sh and managing rc-file sourcing"
 license = "MIT"

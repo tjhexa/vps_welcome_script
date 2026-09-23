@@ -86,6 +86,61 @@ update lookups with `VPSINFO_SKIP_UPDATES=1`, and public-IP/geo lookups with
 
 ---
 
+## Development setup
+
+Everything you need to *hack on this repo* (bash script + Rust GUI/CLI). If
+you only want to **run** it, skip to [Install & run](#install--run).
+
+| Requirement | Details |
+| --- | --- |
+| Git | `git clone` this repo |
+| Bash 3+ | the script runs anywhere bash 3+ exists (Ubuntu 24.04 ships 5.2) |
+| Rust toolchain **≥ 1.81** | via [rustup](https://rustup.rs): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` then `rustup default stable` — current stable (e.g. 1.98) is fine. ⚠️ Don't use the distro `rustc` (Ubuntu 24.04's apt `rustc` is 1.75 — **too old** for eframe 0.31). |
+| `cargo` + `rustfmt` + `clippy` | installed with the `stable` toolchain by default |
+| System libraries (Linux) | **none required to build.** eframe/egui 0.31 builds with the `glow` renderer on top of winit 0.30 + glutin, which `dlopen`s X11/Wayland/EGL/GL at runtime — no dev headers. To *run* the GUI you need a display (X11/Wayland) with an OpenGL/mesa driver, which every desktop already has. |
+| Banner tools (optional) | `curl`, `docker`, `ss`, `nginx`/`apache2`, `fail2ban`, `node`/`npm`, … — missing tools just hide/blank their banner section, nothing is required. |
+
+> `rustc`/`cargo` not on your PATH after installing rustup? Open a new shell or
+> run `source "$HOME/.cargo/env"`.
+
+### Verify you're ready
+
+```bash
+rustc --version        # must be >= 1.81
+cargo --version
+bash -n vps-info.sh    # script syntax check
+```
+
+### Build, test & lint
+
+```bash
+bash tests/run_tests.sh          # bash-side regression suite (run from repo root)
+
+cd gui
+cargo build                      # debug build  -> gui/target/debug/vpsinfo-gui
+cargo run                        # debug run
+cargo test                       # unit tests (settings, wizard, welcome popup, …)
+cargo clippy --all-targets       # lints
+cargo fmt --check                # formatting
+cargo build --release            # optimized + stripped -> gui/target/release/vpsinfo-gui
+```
+
+### Cross / static builds
+
+For other architectures or a fully static CLI binary, add the target first and
+pass it to cargo:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu     # arm64 (glibc)
+rustup target add x86_64-unknown-linux-musl     # fully static CLI
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+See [Share / distribute the binary](#share--distribute-the-binary) for details
+on shipping the result.
+
+---
+
 ## Install & run
 
 ```bash
