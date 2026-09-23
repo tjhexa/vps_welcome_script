@@ -1,0 +1,16 @@
+[package]
+name = "vpsinfo-gui"
+version = "0.1.0"
+edition = "2021"
+description = "GUI + CLI for configuring vps-info.sh and managing rc-file sourcing"
+license = "MIT"
+
+[dependencies]
+eframe = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+
+[profile.release]
+strip = true
+lto = "thin"

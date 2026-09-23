@@ -103,6 +103,50 @@ awk -v s="$BLOCK_START" -v e="$BLOCK_END" '
 grep -q 'vpsinfo:start' "$RC" && bad "rc remove strips only our block" \
   || { ok "rc remove strips only our block"; grep -q '^echo hi$' "$RC" && ok "rc remove preserves user content" || bad "rc remove preserves user content"; }
 
+# ---- 11. vpsinfo-gui end-to-end (release binary; skip if not buildable) ----
+GUI="$ROOT/gui/target/release/vpsinfo-gui"
+if [ ! -x "$GUI" ]; then
+  if has cargo; then
+    echo "  note: building vpsinfo-gui release binary for e2e tests (first run)"
+    (cd "$ROOT/gui" && cargo build --release) >/dev/null 2>&1 || true
+  fi
+fi
+if [ -x "$GUI" ]; then
+  # baked export vs config-driven output parity (structure tokens, volatile values stripped)
+  "$GUI" --generate --path "$TMP/e2e.conf" --preset docker-host --frame 1 --color always >/dev/null 2>&1
+  "$GUI" --export --path "$TMP/e2e-baked.sh" --preset docker-host --frame 1 --color always >/dev/null 2>&1
+  if [ -f "$TMP/e2e-baked.sh" ] && [ -f "$TMP/e2e.conf" ]; then
+    HOME="$TMP/home2" bash "$TMP/e2e-baked.sh" > "$TMP/parity-baked.txt" 2>/dev/null || true
+    HOME="$TMP/home2" VPSINFO_CONF="$TMP/e2e.conf" VPSINFO_COLOR=always bash "$SCRIPT" > "$TMP/parity-cfg.txt" 2>/dev/null || true
+    strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
+    tok() { strip_ansi "$1" | grep '|' | grep -v '^+' | sed -E 's/^\|[[:space:]]*([^ ]+).*/\1/' | sort -u; }
+    strip_ansi "$TMP/parity-baked.txt" > "$TMP/pb.txt"; strip_ansi "$TMP/parity-cfg.txt" > "$TMP/pc.txt"
+    tok "$TMP/parity-baked.txt" > "$TMP/pb.tok"; tok "$TMP/parity-cfg.txt" > "$TMP/pc.tok"
+    if diff -q "$TMP/pb.tok" "$TMP/pc.tok" >/dev/null; then
+      ok "baked export == config-driven output (structure parity)"
+    else
+      bad "baked export == config-driven output"  # shellcheck disable=SC2154
+    fi
+  else
+    bad "e2e generate/export produced expected files"
+  fi
+
+  # rc round-trip on a temp HOME
+  mkdir -p "$TMP/home2"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo hi' > "$TMP/home2/.bashrc"
+  HOME="$TMP/home2" "$GUI" --rc-add >/dev/null 2>&1
+  HOME="$TMP/home2" "$GUI" --check-rc >/dev/null 2>&1
+  [ $? -eq 0 ] && ok "cli --rc-add + --check-rc exit 0" || bad "cli --rc-add + --check-rc exit 0"
+  grep -q 'vpsinfo:start' "$TMP/home2/.bashrc" && ok "cli rc-add installs marker block" || bad "cli rc-add installs marker block"
+  HOME="$TMP/home2" "$GUI" --rc-remove >/dev/null 2>&1
+  HOME="$TMP/home2" "$GUI" --check-rc >/dev/null 2>&1
+  [ $? -eq 1 ] && ok "cli --rc-remove + --check-rc exit 1" || bad "cli --rc-remove + --check-rc exit 1"
+  grep -q '^echo hi$' "$TMP/home2/.bashrc" && ok "cli rc-remove preserves user content" || bad "cli rc-remove preserves user content"
+  ls "$TMP/home2"/.bashrc.vpsinfo.bak.* >/dev/null 2>&1 && ok "cli rc edits leave rotating backups" || bad "cli rc edits leave rotating backups"
+else
+  echo "  SKIP  e2e gui tests (release binary not buildable locally)"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
