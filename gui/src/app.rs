@@ -39,6 +39,11 @@ pub struct App {
     pub window_rect: Option<[f32; 4]>,
     pub new_profile_name: String,
     pub preset_pending: Option<fn() -> crate::settings::Sections>,
+    pub profile_json_path: String,
+    pub pending_screenshot: bool,
+    pub wizard_step: usize,
+    pub wizard_purpose: usize,
+    pub wizard_draft: crate::settings::Sections,
 }
 
 impl App {
@@ -71,6 +76,11 @@ impl App {
             window_rect: None,
             new_profile_name: String::new(),
             preset_pending: None,
+            profile_json_path: settings::expand_tilde("~/.config/vpsinfo/profile.json"),
+            pending_screenshot: false,
+            wizard_step: 0,
+            wizard_purpose: 0,
+            wizard_draft: settings::Sections::docker_host(),
         }
     }
 
@@ -265,6 +275,9 @@ impl App {
         let mut do_redo = false;
         let mut do_generate = false;
         let mut do_preview = false;
+        let mut zoom_in = false;
+        let mut zoom_out = false;
+        let mut zoom_reset = false;
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Z) {
                 do_redo = true;
@@ -281,10 +294,32 @@ impl App {
             if i.consume_key(Modifiers::CTRL, Key::Enter) {
                 do_preview = true;
             }
+            if i.modifiers.ctrl && (i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals)) {
+                zoom_in = true;
+            }
+            if i.modifiers.ctrl && i.key_pressed(Key::Minus) {
+                zoom_out = true;
+            }
+            if i.modifiers.ctrl && i.key_pressed(Key::Num0) {
+                zoom_reset = true;
+            }
             if i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?")) {
                 self.show_help = true;
             }
         });
+        if zoom_in || zoom_out || zoom_reset {
+            let step = if zoom_in { 1.0 } else if zoom_out { -1.0 } else { 0.0 };
+            let base = self.gui.preview_font_size + step;
+            let next = if zoom_reset {
+                13.0
+            } else {
+                base.clamp(8.0, 26.0)
+            };
+            if (next - self.gui.preview_font_size).abs() > f32::EPSILON {
+                self.gui.preview_font_size = next;
+                self.gui.save();
+            }
+        }
         if do_undo {
             if self.history.undo(&mut self.settings) {
                 self.set_status(preview::DIM, "undone (Ctrl+Z)");
@@ -350,7 +385,7 @@ impl App {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                for tab in [Tab::Settings, Tab::Preview, Tab::RcManager, Tab::About] {
+                for tab in [Tab::Settings, Tab::Preview, Tab::RcManager, Tab::About, Tab::Wizard] {
                     if ui.selectable_label(self.active_tab == tab, tab.label()).clicked() {
                         self.active_tab = tab;
                     }
@@ -361,10 +396,16 @@ impl App {
 
         // bottom status/attribution bar
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 match &self.status {
                     Some((c, s)) => {
-                        ui.colored_label(*c, s);
+                        let pill = egui::Frame::default()
+                            .fill(c.gamma_multiply(0.15))
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::symmetric(8, 2));
+                        pill.show(ui, |ui| {
+                            ui.colored_label(*c, s);
+                        });
                     }
                     None => {
                         ui.colored_label(preview::DIM, "ready — hover any toggle for help");
@@ -385,6 +426,7 @@ impl App {
             Tab::Preview => self.preview_ui(ui),
             Tab::RcManager => self.rc_ui(ui),
             Tab::About => self.about_ui(ui),
+            Tab::Wizard => self.wizard_ui(ui),
         });
 
         if self.show_help {
@@ -394,6 +436,28 @@ impl App {
             self.about_window(ctx);
         }
         self.diff_window(ctx);
+
+        // V14: screenshot-to-PNG (request once, save when the event arrives)
+        if self.pending_screenshot {
+            self.pending_screenshot = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        ctx.input(|i| {
+            for ev in &i.events {
+                if let egui::Event::Screenshot { image, .. } = ev {
+                    if let Some(p) = self.save_screenshot(&image) {
+                        self.set_status(preview::GREEN, format!("preview saved to {p} (path copied to clipboard)"));
+                        ctx.copy_text(p.clone());
+                    } else {
+                        self.set_status(preview::RED, "could not write preview PNG");
+                    }
+                }
+            }
+        });
+
+        if !self.gui.first_run_dismissed {
+            self.first_run_window(ctx);
+        }
 
         // history recording + persistence
         if self.suppress_history {
@@ -422,43 +486,118 @@ impl App {
             self.presets_row(ui);
             ui.separator();
 
-            ui.heading("Sections");
-            ui.label(RichText::new("Each maps to a VPSINFO_SHOW_* flag on the generated config / baked script").weak());
+            ui.heading("Settings");
+            ui.label(RichText::new("Groups collapse to keep the tab short; state is remembered.").weak());
             ui.add_space(4.0);
-            self.sections_grid(ui);
-            ui.add_space(8.0);
 
-            ui.heading("Appearance");
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Color mode:");
-                self.color_mode_combo(ui);
-                ui.checkbox(&mut self.settings.frame, "Frame around output")
-                    .on_hover_text("Draw the screenfetch-style box (VPSINFO_FRAME)");
-            });
-            ui.add_space(8.0);
+            let mut cg = self.gui.collapsed;
 
-            ui.heading("Behavior");
-            ui.label(RichText::new("Cost/scope of the scans — maps to VPSINFO_SKIP_* / NO_PUBLIC_IP / VPSINFO_SKIP_GEO").weak());
+            // ---- Sections ----
+            let open = !cg.sections;
+            let resp = egui::CollapsingHeader::new("Sections — the 15 banner blocks")
+                .id_salt("col-sections")
+                .open(Some(open))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Each maps to a VPSINFO_SHOW_* flag on the generated config / baked script").weak());
+                    ui.add_space(4.0);
+                    self.sections_grid(ui);
+                    ui.add_space(8.0);
+                });
+            if resp.header_response.clicked() {
+                cg.sections = !cg.sections;
+            }
+
+            // ---- Appearance ----
+            let open = !cg.appearance;
+            let resp = egui::CollapsingHeader::new("Appearance — colors, frame, theme")
+                .id_salt("col-appearance")
+                .open(Some(open))
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Color mode:");
+                        self.color_mode_combo(ui);
+                        ui.checkbox(&mut self.settings.frame, "Frame around output")
+                            .on_hover_text("Draw the screenfetch-style box (VPSINFO_FRAME)");
+                    });
+                    ui.add_space(8.0);
+                });
+            if resp.header_response.clicked() {
+                cg.appearance = !cg.appearance;
+            }
+
+            // ---- Behavior ----
+            let open = !cg.behavior;
+            let resp = egui::CollapsingHeader::new("Behavior — scan cost & scope")
+                .id_salt("col-behavior")
+                .open(Some(open))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Cost/scope of the scans — maps to VPSINFO_SKIP_* / NO_PUBLIC_IP / VPSINFO_SKIP_GEO").weak());
+                    ui.add_space(4.0);
+                    self.behavior_ui(ui);
+                    ui.add_space(8.0);
+                });
+            if resp.header_response.clicked() {
+                cg.behavior = !cg.behavior;
+            }
+
+            // ---- Paths ----
+            let open = !cg.paths;
+            let resp = egui::CollapsingHeader::new("Paths — where things get written")
+                .id_salt("col-paths")
+                .open(Some(open))
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.label("Baked export + rc hook target:");
+                    ui.add(egui::TextEdit::singleline(&mut self.settings.script_path).hint_text("~/vps-info.sh"));
+                    ui.label("Runtime config file (read by the canonical script):");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings.config_path)
+                            .hint_text("~/.config/vpsinfo/vpsinfo.conf"),
+                    );
+                    ui.add_space(8.0);
+                });
+            if resp.header_response.clicked() {
+                cg.paths = !cg.paths;
+            }
+
+            if cg != self.gui.collapsed {
+                self.gui.collapsed = cg;
+                self.gui.save();
+            }
+
+            ui.separator();
+            self.defaults_row(ui);
             ui.add_space(4.0);
-            self.behavior_ui(ui);
-            ui.add_space(8.0);
-
-            ui.heading("Paths");
-            ui.label("Baked export + rc hook target:");
-            ui.add(egui::TextEdit::singleline(&mut self.settings.script_path).hint_text("~/vps-info.sh"));
-            ui.label("Runtime config file (read by the canonical script):");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.settings.config_path)
-                    .hint_text("~/.config/vpsinfo/vpsinfo.conf"),
-            );
-            ui.add_space(10.0);
-
             self.output_buttons(ui);
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Shortcuts:  Ctrl+S generate · Ctrl+Enter real preview · Ctrl+Z undo / Ctrl+Shift+Z redo · ? help")
+                RichText::new("Shortcuts:  Ctrl+S generate · Ctrl+Enter real preview · Ctrl+Z undo / Ctrl+Shift+Z redo · Ctrl +/- preview zoom · ? help")
                     .weak(),
             );
+        });
+    }
+
+    /// V4 (#19): reset-to-defaults button + “N settings differ from defaults” badge.
+    fn defaults_row(&mut self, ui: &mut egui::Ui) {
+        let n = self.settings.diff_count();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button(RichText::new("Reset to defaults").strong())
+                .on_hover_text("Restore every value to the factory defaults (paths are kept)")
+                .clicked()
+            {
+                let mut d = settings::Settings::default();
+                d.script_path = self.settings.script_path.clone();
+                d.config_path = self.settings.config_path.clone();
+                self.settings = d;
+                self.set_status(preview::GREEN, "reset to defaults");
+            }
+            if n > 0 {
+                ui.colored_label(preview::YELLOW, format!("{n} setting(s) differ from defaults"));
+            } else {
+                ui.colored_label(preview::DIM, "matches defaults");
+            }
         });
     }
 
@@ -510,6 +649,64 @@ impl App {
                 self.save_current_profile();
                 self.set_status(preview::GREEN, "profile saved");
             }
+            ui.separator();
+            ui.label(RichText::new("Copy to another machine:").weak());
+            ui.add(
+                egui::TextEdit::singleline(&mut self.profile_json_path)
+                    .desired_width(220.0)
+                    .hint_text("profile.json path"),
+            );
+            if ui
+                .button("Export JSON")
+                .on_hover_text("Write this profile to a JSON file you can copy to another machine")
+                .clicked()
+            {
+                let p = settings::expand_tilde(&self.profile_json_path);
+                match self.settings.to_json() {
+                    Ok(txt) => {
+                        if let Some(dir) = std::path::Path::new(&p).parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        match std::fs::write(&p, txt) {
+                            Ok(()) => self.set_status(preview::GREEN, format!("profile JSON written to {p}")),
+                            Err(e) => self.set_status(preview::RED, format!("export json: {e}")),
+                        }
+                    }
+                    Err(e) => self.set_status(preview::RED, format!("export json: {e}")),
+                }
+            }
+            if ui
+                .button("Import JSON")
+                .on_hover_text("Load a profile from a JSON file — added as a new profile")
+                .clicked()
+            {
+                let p = settings::expand_tilde(&self.profile_json_path);
+                match std::fs::read_to_string(&p)
+                    .ok()
+                    .and_then(|t| settings::Settings::from_json(&t))
+                {
+                    Some(s) => {
+                        let base = if self.new_profile_name.trim().is_empty() {
+                            "Imported".to_string()
+                        } else {
+                            self.new_profile_name.trim().to_string()
+                        };
+                        let mut name = base.clone();
+                        let mut i = 1;
+                        while self.gui.profiles.contains_key(&name) {
+                            name = format!("{base} {}", i);
+                            i += 1;
+                        }
+                        self.gui.profiles.insert(name.clone(), s.clone());
+                        self.gui.current_profile = name.clone();
+                        self.gui.save();
+                        self.switch_profile(name.clone());
+                        self.new_profile_name.clear();
+                        self.set_status(preview::GREEN, format!("imported profile from {p}"));
+                    }
+                    None => self.set_status(preview::RED, format!("could not parse {p} as a vpsinfo profile JSON")),
+                }
+            }
         });
     }
 
@@ -542,6 +739,62 @@ impl App {
         }
     }
 
+    /// V14 (#30): save the window screenshot as PNG (path returned for status).
+    fn save_screenshot(&self, img: &egui::ColorImage) -> Option<String> {
+        let (w, h) = (img.size[0], img.size[1]);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for p in img.pixels.iter() {
+            rgb.extend_from_slice(&[p.r(), p.g(), p.b()]);
+        }
+        let buf = image::RgbImage::from_raw(w as u32, h as u32, rgb)?;
+        let path = settings::expand_tilde("~/.config/vpsinfo/preview.png");
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        buf.save(&path).ok()?;
+        Some(path)
+    }
+
+    /// V7 (#26): one-time welcome popup with a “don't show again” checkbox.
+    fn first_run_window(&mut self, ctx: &Context) {
+        let mut open = true;
+        let mut got_started = false;
+        let mut dont = false;
+        egui::Window::new("Welcome to vpsinfo-gui")
+            .id(egui::Id::new("welcome"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+            .show(ctx, |ui| {
+                ui.heading("Welcome to vpsinfo-gui");
+                ui.add_space(4.0);
+                ui.label("A one-stop switcher for the vps-info login banner: ");
+                ui.label("• toggle the 15 sections, colors and frame on the Settings tab");
+                ui.label("• Preview shows a live mock and can run the real script");
+                ui.label("• rc Manager installs/removes the SSH-login hook safely");
+                ui.label("• Generate config / Export baked script at any time");
+                ui.add_space(8.0);
+                ui.label(RichText::new("Tip: pick a preset (e.g. Docker-host) to start from a sensible section set.").weak());
+                ui.add_space(8.0);
+                ui.checkbox(&mut dont, "Don't show this again");
+                ui.add_space(4.0);
+                if ui.button(RichText::new("Get started").strong()).clicked() {
+                    got_started = true;
+                }
+            });
+        if got_started || !open {
+            // Shown only while first_run_dismissed == false; persist the
+            // user's choice when the window closes (X or Get started).
+            self.gui.first_run_dismissed = dont;
+            self.gui.save();
+        }
+    }
+
     fn color_mode_combo(&mut self, ui: &mut egui::Ui) {
         ComboBox::from_id_salt("color")
             .selected_text(match self.settings.color {
@@ -557,18 +810,7 @@ impl App {
     }
 
     fn sections_grid(&mut self, ui: &mut egui::Ui) {
-        let s = &mut self.settings.sections;
-        egui::Grid::new("sections")
-            .num_columns(2)
-            .spacing([28.0, 6.0])
-            .show(ui, |ui| {
-                for (i, (label, tip, _, set)) in settings::SECTION_ENTRIES.iter().enumerate() {
-                    ui.checkbox((*set)(s), *label).on_hover_text(*tip);
-                    if i % 2 == 1 {
-                        ui.end_row();
-                    }
-                }
-            });
+        sections_grid(ui, &mut self.settings.sections);
     }
 
     fn behavior_ui(&mut self, ui: &mut egui::Ui) {
@@ -627,35 +869,88 @@ impl App {
                 ui.spinner();
                 ui.label(RichText::new("running…").weak());
             }
+            ui.separator();
+            let fs = self.gui.preview_font_size;
+            if ui.small_button("Zoom -").on_hover_text("Ctrl+-").clicked() {
+                self.gui.preview_font_size = (fs - 1.0).clamp(8.0, 26.0);
+                self.gui.save();
+            }
+            if ui.small_button("Zoom +").on_hover_text("Ctrl+=").clicked() {
+                self.gui.preview_font_size = (fs + 1.0).clamp(8.0, 26.0);
+                self.gui.save();
+            }
+            if ui.small_button("100%").on_hover_text("Ctrl+0").clicked() {
+                self.gui.preview_font_size = 13.0;
+                self.gui.save();
+            }
+            ui.separator();
+            if ui
+                .button("Save PNG")
+                .on_hover_text("Screenshot the window to ~/.config/vpsinfo/preview.png and copy the path")
+                .clicked()
+            {
+                self.pending_screenshot = true;
+            }
+        });
+
+        // V2 (#5): live colour strip — same thresholds as the real script.
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            swatch(ui, preview::GREEN, "5 <= healthy (<60%)");
+            swatch(ui, preview::YELLOW, "6 = caution (60-79%)");
+            swatch(ui, preview::RED, "7 = critical (80%+)");
+            ui.label(RichText::new("— colours match the real script's thresholds").weak());
         });
         ui.add_space(6.0);
+
+        let (job, width) = match &self.real_preview {
+            PreviewState::Idle | PreviewState::Running { .. } => {
+                let lines = preview::build_mock(&self.settings.sections, self.settings.frame);
+                let w = preview::mock_max_width(&lines);
+                let job = preview::lines_to_job(&lines, self.gui.preview_font_size);
+                (job, w)
+            }
+            PreviewState::Done(o) => {
+                let w = preview::ansi_max_width(&o.text);
+                let job = preview::ansi_to_job(&o.text, self.gui.preview_font_size);
+                (job, w)
+            }
+        };
+
+        // V6 (#23): wrap-aware preview
+        let cols: usize = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(80);
+        if width > cols {
+            ui.colored_label(
+                preview::YELLOW,
+                format!("banner is {width} columns wide — will soft-wrap on a {cols}-column terminal; reduce sections or widen the terminal"),
+            );
+        } else {
+            ui.colored_label(preview::DIM, format!("{width} columns wide — fits a {cols}-column terminal"));
+        }
+        ui.add_space(6.0);
+
         ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                match &self.real_preview {
-                    PreviewState::Idle | PreviewState::Running { .. } => {
-                        let lines = preview::build_mock(&self.settings.sections, self.settings.frame);
-                        let job = preview::lines_to_job(&lines, 13.0);
-                        ui.add(egui::Label::new(job));
-                        if let PreviewState::Running { .. } = self.real_preview {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("…processing (max 8s)").weak());
-                        }
-                    }
-                    PreviewState::Done(o) => {
-                        if o.timed_out {
-                            ui.colored_label(preview::YELLOW, "preview timed out after 8s — some scans may be missing");
-                        }
-                        if let Some(e) = &o.error {
-                            if !e.trim().is_empty() {
-                                ui.colored_label(preview::RED, e);
-                            }
-                        }
-                        let job = preview::ansi_to_job(&o.text, 13.0);
-                        ui.add(egui::Label::new(job));
-                    }
+                ui.add(egui::Label::new(job));
+                if let PreviewState::Running { .. } = self.real_preview {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("…processing (max 8s)").weak());
                 }
             });
+        if let PreviewState::Done(o) = &self.real_preview {
+            if o.timed_out {
+                ui.colored_label(preview::YELLOW, "preview timed out after 8s — some scans may be missing");
+            }
+            if let Some(e) = &o.error {
+                if !e.trim().is_empty() {
+                    ui.colored_label(preview::RED, e);
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- rc tab
@@ -759,6 +1054,31 @@ impl App {
                 self.request_rc_remove();
             }
         });
+        ui.add_space(6.0);
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Whole machine (needs sudo):").weak());
+            if ui
+                .button("Install system-wide…")
+                .on_hover_text("Install the baked script to /usr/local/bin and hook /etc/profile.d for SSH logins (asks for sudo)")
+                .clicked()
+            {
+                match actions::install_system(&self.settings) {
+                    Ok(msg) => self.set_status(preview::GREEN, msg),
+                    Err(e) => self.set_status(preview::RED, format!("install system-wide: {e}")),
+                }
+            }
+            if ui
+                .button("Remove system-wide")
+                .on_hover_text("Remove /usr/local/bin/vpsinfo and the /etc/profile.d hook (asks for sudo)")
+                .clicked()
+            {
+                match actions::uninstall_system() {
+                    Ok(msg) => self.set_status(preview::GREEN, msg),
+                    Err(e) => self.set_status(preview::RED, format!("remove system-wide: {e}")),
+                }
+            }
+        });
     }
 
     // ---------------------------------------------------------------- about tab
@@ -767,6 +1087,30 @@ impl App {
         ui.add_space(6.0);
         ui.heading("vpsinfo-gui");
         ui.label(RichText::new("Configure, preview and install the vps-info banner — with an rc-file manager.").weak());
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Copy install snippet")
+                .on_hover_text("Copy the README hook snippet with your current script path to the clipboard")
+                .clicked()
+            {
+                let path = settings::expand_tilde(&self.settings.script_path);
+                let snippet = format!(
+                    "echo '{path}' >> ~/.bashrc   # permanent SSH-login banner\n# or: echo 'bash {path}' >> ~/.bashrc\n# remove later with: vpsinfo-gui --rc-remove"
+                );
+                ui.ctx().copy_text(snippet);
+                self.set_status(preview::GREEN, "install snippet copied to clipboard");
+            }
+            if ui
+                .button("Copy config path")
+                .on_hover_text("Copy the runtime config file path to the clipboard")
+                .clicked()
+            {
+                let p = settings::expand_tilde(&self.settings.config_path);
+                ui.ctx().copy_text(p);
+                self.set_status(preview::GREEN, "config path copied to clipboard");
+            }
+        });
         ui.add_space(8.0);
         about_text(ui);
     }
@@ -789,6 +1133,7 @@ impl App {
                             ("?", "this help window"),
                             ("Ctrl+S", "generate the config file"),
                             ("Ctrl+Enter", "run the real preview"),
+                            ("Ctrl+= / Ctrl+- / Ctrl+0", "preview zoom in / out / reset"),
                             ("Ctrl+Z", "undo settings change"),
                             ("Ctrl+Shift+Z / Ctrl+Y", "redo settings change"),
                         ] {
@@ -888,7 +1233,130 @@ impl App {
             self.diff = None;
         }
     }
+
+    // ---------------------------------------------------------------- wizard (#24)
+
+    fn wizard_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Setup wizard");
+        ui.label(
+            RichText::new("Three steps: pick a purpose, trim the sections, confirm — then finish on the Settings tab.")
+                .weak(),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for (i, name) in ["1 · Purpose", "2 · Sections", "3 · Confirm"].iter().enumerate() {
+                let _ = ui.selectable_label(self.wizard_step == i, *name);
+            }
+        });
+        ui.separator();
+        match self.wizard_step {
+            0 => self.wizard_purpose_ui(ui),
+            1 => self.wizard_sections_ui(ui),
+            _ => self.wizard_confirm_ui(ui),
+        }
+        ui.add_space(10.0);
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(self.wizard_step > 0, egui::Button::new("Back"))
+                .clicked()
+            {
+                self.wizard_step -= 1;
+            }
+            let last = self.wizard_step == 2;
+            let label = if last { "Apply & go to Settings" } else { "Next" };
+            if ui
+                .add_enabled(
+                    last || self.wizard_step == 1,
+                    egui::Button::new(RichText::new(label).strong()),
+                )
+                .clicked()
+            {
+                if last {
+                    self.settings.sections = self.wizard_draft.clone();
+                    self.active_tab = Tab::Settings;
+                    self.set_status(preview::GREEN, "wizard applied to the current profile");
+                } else {
+                    self.wizard_step += 1;
+                }
+            }
+        });
+    }
+
+    fn wizard_purpose_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label("What kind of machine is this?");
+        ui.add_space(4.0);
+        for (i, (name, desc, f)) in WIZARD_PURPOSES.iter().enumerate() {
+            if ui
+                .selectable_label(self.wizard_purpose == i, format!("{name} — {desc}"))
+                .clicked()
+            {
+                self.wizard_purpose = i;
+                self.wizard_draft = f();
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("(every section is adjustable on the next step)").weak());
+    }
+
+    fn wizard_sections_ui(&mut self, ui: &mut egui::Ui) {
+        let (name, _, _) = WIZARD_PURPOSES[self.wizard_purpose];
+        ui.label(RichText::new(format!("Trim the “{name}” preset to taste — the preview below updates live.")).weak());
+        ui.add_space(6.0);
+        ScrollArea::vertical()
+            .id_salt("wizard_sections")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                sections_grid(ui, &mut self.wizard_draft);
+            });
+        ui.add_space(8.0);
+        let lines = preview::build_mock(&self.wizard_draft, false);
+        let job = preview::lines_to_job(&lines, 12.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(6.0)
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(job));
+            });
+    }
+
+    fn wizard_confirm_ui(&mut self, ui: &mut egui::Ui) {
+        let (name, desc, _) = WIZARD_PURPOSES[self.wizard_purpose];
+        ui.label(RichText::new(format!("Purpose: {name}")).strong());
+        ui.label(RichText::new(desc).weak());
+        ui.add_space(6.0);
+        let mut n = 0usize;
+        let mut names: Vec<&str> = Vec::new();
+        for (label, _, get, _) in settings::SECTION_ENTRIES.iter() {
+            if *get(&self.wizard_draft) {
+                n += 1;
+                names.push(label);
+            }
+        }
+        ui.label(format!("{n} of 15 sections enabled."));
+        if !names.is_empty() {
+            ui.add(egui::Label::new(RichText::new(names.join(", ")).weak()).wrap());
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label("Result preview:");
+        let lines = preview::build_mock(&self.wizard_draft, false);
+        let job = preview::lines_to_job(&lines, 12.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(6.0)
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(job));
+            });
+    }
 }
+
+const WIZARD_PURPOSES: &[(&str, &str, fn() -> crate::settings::Sections)] = &[
+    ("Docker host", "container boxes: docker + ports + security emphasized", crate::settings::Sections::docker_host),
+    ("VPS", "production server: ports + security, no dev-tools", crate::settings::Sections::vps_only),
+    ("Desktop workstation", "local machine: no docker/web/ports/security", crate::settings::Sections::desktop_only),
+    ("Dev box", "tooling + system stats only", crate::settings::Sections::dev_box),
+    ("Server (minimal)", "system, disk, network, maintenance", crate::settings::Sections::server_minimal),
+    ("Everything on", "all 15 sections", crate::settings::Sections::desktop_full),
+];
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
@@ -962,4 +1430,28 @@ fn about_text(ui: &mut egui::Ui) {
     ui.hyperlink("https://github.com/tjhexa/vps_welcome_script");
     ui.separator();
     ui.label("vps-info.sh and vpsinfo-gui — MIT licensed.");
+}
+
+/// A small colour chip + text, used by the preview colour strip.
+fn swatch(ui: &mut egui::Ui, color: Color32, text: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 3.0, color);
+        ui.label(RichText::new(text).weak());
+    });
+}
+
+/// The 15-section toggle grid, reusable on any draft (settings or wizard).
+fn sections_grid(ui: &mut egui::Ui, s: &mut settings::Sections) {
+    egui::Grid::new("sections")
+        .num_columns(2)
+        .spacing([28.0, 6.0])
+        .show(ui, |ui| {
+            for (i, (label, tip, _, set)) in settings::SECTION_ENTRIES.iter().enumerate() {
+                ui.checkbox((*set)(s), *label).on_hover_text(*tip);
+                if i % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
 }

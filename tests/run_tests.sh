@@ -143,6 +143,42 @@ if [ -x "$GUI" ]; then
   [ $? -eq 1 ] && ok "cli --rc-remove + --check-rc exit 1" || bad "cli --rc-remove + --check-rc exit 1"
   grep -q '^echo hi$' "$TMP/home2/.bashrc" && ok "cli rc-remove preserves user content" || bad "cli rc-remove preserves user content"
   ls "$TMP/home2"/.bashrc.vpsinfo.bak.* >/dev/null 2>&1 && ok "cli rc edits leave rotating backups" || bad "cli rc edits leave rotating backups"
+
+  # v2: --dry-run writes nothing to disk
+  mkdir -p "$TMP/home3"
+  HOME="$TMP/home3" "$GUI" --generate --dry-run --path "$TMP/home3/never.sh" > "$TMP/dr-gen.txt" 2>/dev/null
+  [ ! -f "$TMP/home3/never.sh" ] && grep -q 'VPSINFO_SHOW_SUMMARY=' "$TMP/dr-gen.txt" \
+    && ok "cli --generate --dry-run prints, writes nothing" || bad "cli --generate --dry-run prints, writes nothing"
+  HOME="$TMP/home3" "$GUI" --export --dry-run > "$TMP/dr-exp.txt" 2>/dev/null
+  grep -q 'VPSINFO_NO_CONFIG=1' "$TMP/dr-exp.txt" && grep -q '#!/usr/bin/env bash' "$TMP/dr-exp.txt" \
+    && ok "cli --export --dry-run prints the baked script" || bad "cli --export --dry-run prints the baked script"
+  HOME="$TMP/home3" "$GUI" --rc-add --dry-run > "$TMP/dr-rc.txt" 2>/dev/null
+  grep -q 'vpsinfo:start' "$TMP/dr-rc.txt" && ! grep -q 'vpsinfo:start' "$TMP/home3/.bashrc" 2>/dev/null \
+    && ok "cli --rc-add --dry-run prints the block, edits nothing" || bad "cli --rc-add --dry-run prints the block, edits nothing"
+
+  # v2: new presets -> expected section flags
+  HOME="$TMP/home3" "$GUI" --generate --dry-run --preset vps-only | grep -q 'VPSINFO_SHOW_PORTS=1' \
+    && HOME="$TMP/home3" "$GUI" --generate --dry-run --preset vps-only | grep -q 'VPSINFO_SHOW_TOOLS=0' \
+    && ok "preset vps-only (ports=1, tools=0)" || bad "preset vps-only (ports=1, tools=0)"
+  HOME="$TMP/home3" "$GUI" --generate --dry-run --preset dev-box | grep -q 'VPSINFO_SHOW_NETWORK=0' \
+    && HOME="$TMP/home3" "$GUI" --generate --dry-run --preset dev-box | grep -q 'VPSINFO_SHOW_TOOLS=1' \
+    && ok "preset dev-box (network=0, tools=1)" || bad "preset dev-box (network=0, tools=1)"
+
+  # v2: profile JSON export/import round-trip
+  mkdir -p "$TMP/home4"
+  HOME="$TMP/home4" "$GUI" --export-json --preset desktop-only --path "$TMP/home4/p.json" >/dev/null 2>&1
+  grep -q '"script_path"' "$TMP/home4/p.json" && ok "cli --export-json writes a JSON profile" || bad "cli --export-json writes a JSON profile"
+  HOME="$TMP/home4" "$GUI" --import-json --path "$TMP/home4/p.json" >/dev/null 2>&1
+  HOME="$TMP/home4" "$GUI" --generate --dry-run > "$TMP/home4/after.txt" 2>/dev/null
+  grep -q 'VPSINFO_SHOW_DOCKER=0' "$TMP/home4/after.txt" && grep -q 'VPSINFO_SHOW_TOOLS=1' "$TMP/home4/after.txt" \
+    && ok "cli --import-json persists and drives the next generate" || bad "cli --import-json persists and drives the next generate"
+
+  # v2: autodetect existing config on a fresh HOME
+  mkdir -p "$TMP/home5/.config/vpsinfo"
+  printf 'VPSINFO_SHOW_DOCKER=1\nVPSINFO_SHOW_WEB=0\nVPSINFO_FRAME=1\n' > "$TMP/home5/.config/vpsinfo/vpsinfo.conf"
+  HOME="$TMP/home5" "$GUI" --generate --dry-run > "$TMP/home5/auto.txt" 2>/dev/null
+  grep -q 'VPSINFO_SHOW_DOCKER=1' "$TMP/home5/auto.txt" && grep -q 'VPSINFO_FRAME=1' "$TMP/home5/auto.txt" \
+    && ok "fresh launch autodetects an existing vpsinfo.conf" || bad "fresh launch autodetects an existing vpsinfo.conf"
 else
   echo "  SKIP  e2e gui tests (release binary not buildable locally)"
 fi

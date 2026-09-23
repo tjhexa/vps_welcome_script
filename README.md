@@ -119,16 +119,17 @@ cargo build --release       # binary: gui/target/release/vpsinfo-gui
 cargo run --release
 ```
 
-The GUI has four tabs:
+The GUI has five tabs:
 
 | Tab | What it does |
 | --- | --- |
-| **Settings** | 15 section toggles, color mode (auto/always/never), frame, CPU sample / updates / public IP / geo, ssh-only guard, theme, presets + named profiles. Undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`). |
-| **Preview** | Live mock banner that reacts to every toggle, plus **▶ Run real preview** (`Ctrl+Enter`) which actually executes the script with your settings (8s timeout, network off). |
-| **rc Manager** | Tick `~/.bashrc` / `~/.zshrc` / `~/.profile` … to add or remove the hook. Shows live `sourced ✓` badges, an exact rc-block preview, a green/red diff before applying, and a one-click restore list of the rotating backups (`*.vpsinfo.bak.1..4`). |
-| **About** | Attribution, shortcuts, theme/config locations. |
+| **Wizard** | 3-step setup for first-timers: pick a purpose (Docker host / VPS / desktop / dev box / minimal / everything), trim the sections with a live preview, confirm — then finish on Settings. |
+| **Settings** | 15 section toggles, color mode (auto/always/never), frame, CPU sample / updates / public IP / geo, ssh-only guard, theme, presets + named profiles, JSON import/export of any profile, reset-to-defaults. Groups collapse to keep it short. Undo/redo (`Ctrl+Z` / `Ctrl+Shift+Z`). **Autodetects an existing `vpsinfo.conf` on first launch.** |
+| **Preview** | Live mock banner that reacts to every toggle (green/yellow/red colour strip, zoomable), plus **Run real preview** (`Ctrl+Enter`) which actually executes the script with your settings (8s timeout, network off). Warns if the banner is wider than 80 columns. **Save PNG** screenshots the window for issue reports. |
+| **rc Manager** | Tick `~/.bashrc` / `~/.zshrc` / `~/.profile` … to add or remove the hook. Shows live `sourced` badges, an exact rc-block preview, a green/red diff before applying, a one-click restore list of the rotating backups (`*.vpsinfo.bak.1..4`), and **Install system-wide** / **Remove system-wide** (sudo: `/usr/local/bin` + `/etc/profile.d`). |
+| **About** | Copy-install-snippet (with your real script path), config-path copy, attribution, shortcuts. |
 
-**Shortcuts:** `Ctrl+S` write config · `Ctrl+Enter` real preview · `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `?` shortcuts & help.
+**Shortcuts:** `Ctrl+S` write config · `Ctrl+Enter` real preview · `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `Ctrl+=` / `Ctrl+-` / `Ctrl+0` preview zoom · `?` shortcuts & help. A one-time welcome popup greets first-timers.
 
 ### Headless CLI (same binary)
 
@@ -143,11 +144,22 @@ vpsinfo-gui --export --path ~/vps-info-baked.sh    # standalone script, values e
 vpsinfo-gui --rc-add --ssh-only              # append hook to rc files (SSH-only guard)
 vpsinfo-gui --rc-remove                      # strip only the vpsinfo block (backed up)
 vpsinfo-gui --check-rc                       # exit 0 = sourced, 1 = not, 2 = no rc files
+vpsinfo-gui --generate --dry-run             # print the config instead of writing it
+vpsinfo-gui --export-json --path profile.json      # export the current profile as JSON
+vpsinfo-gui --import-json --path profile.json      # import it back (persisted)
+vpsinfo-gui --install-system                 # sudo: /usr/local/bin + /etc/profile.d hook
+vpsinfo-gui --remove-system                  # sudo: undo the above
 ```
 
 Config keys can also be passed as flags — `--color auto|always|never`,
-`--frame 0|1`, `--ssh-only 0|1`, `--preset server-minimal|desktop-full|docker-host|all-off`,
-`--script PATH` (which script the rc hook should run).
+`--frame 0|1`, `--ssh-only 0|1`,
+`--preset server-minimal|desktop-full|docker-host|all-off|desktop-only|vps-only|dev-box`,
+`--script PATH` (which script the rc hook should run). `--dry-run` prints instead
+of writing for `--generate`, `--export` and `--rc-add`.
+
+If `~/.config/vpsinfo/vpsinfo.conf` already exists, the GUI (and plain
+`--generate` / `--export`) start from those values instead of the defaults —
+autodetect, so you always see what's actually deployed.
 
 ### Share / distribute the binary
 
@@ -159,7 +171,7 @@ What it needs at runtime:
 
 | Face | Runtime requirements |
 | --- | --- |
-| **CLI** (`--generate`, `--export`, `--rc-add`, `--rc-remove`, `--check-rc`) | Nothing but a standard `glibc` (libc/libm/libgcc — every desktop/server has these). Works headless, over SSH, in containers. |
+| **CLI** (every flag: `--generate`, `--export`, `--rc-add`, `--rc-remove`, `--check-rc`, `--export-json`, `--import-json`, `--install-system`, `--dry-run`) | Nothing but a standard `glibc` (libc/libm/libgcc — every desktop/server has these). Works headless, over SSH, in containers. |
 | **GUI** | A display with X11 or Wayland and an OpenGL driver (mesa on most desktops). GL is loaded at startup via `dlopen`, so a machine without *any* GL stack will still run the CLI fine. GUI runs acceptably on a 960×600 window or bigger. |
 
 To hand the binary to someone:

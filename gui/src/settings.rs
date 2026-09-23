@@ -62,6 +62,7 @@ pub enum Tab {
     Preview,
     RcManager,
     About,
+    Wizard,
 }
 
 impl Tab {
@@ -71,6 +72,7 @@ impl Tab {
             Tab::Preview => "Preview",
             Tab::RcManager => "rc Manager",
             Tab::About => "About",
+            Tab::Wizard => "Wizard",
         }
     }
 }
@@ -164,6 +166,33 @@ impl Sections {
             ports: false, security: false, maint: false, tools: false, footer: false,
         }
     }
+
+    /// Workstation: everything except server-only noise (docker/web/ports/security).
+    pub fn desktop_only() -> Self {
+        Self {
+            summary: true, banner: true, system: true, cpu: true, memory: true,
+            disk: true, network: true, processes: true, docker: false, web: false,
+            ports: false, security: false, maint: true, tools: true, footer: true,
+        }
+    }
+
+    /// VPS: no docker/web/dev-tools; ports + security in.
+    pub fn vps_only() -> Self {
+        Self {
+            summary: true, banner: true, system: true, cpu: true, memory: true,
+            disk: true, network: true, processes: false, docker: false, web: false,
+            ports: true, security: true, maint: true, tools: false, footer: true,
+        }
+    }
+
+    /// Dev box: tooling + system stats, no server-only sections.
+    pub fn dev_box() -> Self {
+        Self {
+            summary: true, banner: true, system: true, cpu: true, memory: true,
+            disk: true, network: false, processes: true, docker: false, web: false,
+            ports: false, security: false, maint: false, tools: true, footer: true,
+        }
+    }
 }
 
 pub const PRESETS: &[(&str, &str, fn() -> Sections)] = &[
@@ -171,6 +200,9 @@ pub const PRESETS: &[(&str, &str, fn() -> Sections)] = &[
     ("Desktop-full", "every section on", Sections::desktop_full),
     ("Docker-host", "docker + ports + security emphasized", Sections::docker_host),
     ("All-off", "clean slate (nothing shown)", Sections::all_off),
+    ("Desktop-only", "workstation: no docker/web/ports/security", Sections::desktop_only),
+    ("VPS-only", "server: ports + security, no dev-tools", Sections::vps_only),
+    ("Dev-box", "tooling + system stats only", Sections::dev_box),
 ];
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -272,6 +304,121 @@ impl Settings {
         out.push_str("export VPSINFO_NO_CONFIG=1\n");
         out
     }
+
+    /// How many fields differ from `Settings::default()` (used for the
+    /// "N settings differ from defaults" badge).
+    pub fn diff_count(&self) -> usize {
+        let d = Settings::default();
+        let mut n = 0usize;
+        let (s, ds) = (&self.sections, &d.sections);
+        for (a, b) in [
+            (s.summary, ds.summary),
+            (s.banner, ds.banner),
+            (s.system, ds.system),
+            (s.cpu, ds.cpu),
+            (s.memory, ds.memory),
+            (s.disk, ds.disk),
+            (s.network, ds.network),
+            (s.processes, ds.processes),
+            (s.docker, ds.docker),
+            (s.web, ds.web),
+            (s.ports, ds.ports),
+            (s.security, ds.security),
+            (s.maint, ds.maint),
+            (s.tools, ds.tools),
+            (s.footer, ds.footer),
+        ] {
+            if a != b {
+                n += 1;
+            }
+        }
+        if self.frame != d.frame {
+            n += 1;
+        }
+        if self.color != d.color {
+            n += 1;
+        }
+        if self.live_cpu_sample != d.live_cpu_sample {
+            n += 1;
+        }
+        if self.update_counts != d.update_counts {
+            n += 1;
+        }
+        if self.public_ip != d.public_ip {
+            n += 1;
+        }
+        if self.geo_asn != d.geo_asn {
+            n += 1;
+        }
+        if self.ssh_only != d.ssh_only {
+            n += 1;
+        }
+        if self.theme != d.theme {
+            n += 1;
+        }
+        if self.script_path.trim() != d.script_path.trim() {
+            n += 1;
+        }
+        if self.config_path.trim() != d.config_path.trim() {
+            n += 1;
+        }
+        n
+    }
+
+    /// Parse a `vpsinfo.conf`-style KEY=VALUE text into a Settings (unknown
+    /// keys ignored; missing keys keep defaults). Used by autodetect (V10).
+    pub fn from_config_text(txt: &str) -> Settings {
+        let mut s = Settings::default();
+        for line in txt.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (k, v) = match line.split_once('=') {
+                Some(kv) => kv,
+                None => continue,
+            };
+            let k = k.trim();
+            let v = v.trim();
+            let on = v == "1" || v.eq_ignore_ascii_case("true") || v == "on";
+            let sec = &mut s.sections;
+            match k {
+                "VPSINFO_SHOW_SUMMARY" => sec.summary = on,
+                "VPSINFO_SHOW_BANNER" => sec.banner = on,
+                "VPSINFO_SHOW_SYSTEM" => sec.system = on,
+                "VPSINFO_SHOW_CPU" => sec.cpu = on,
+                "VPSINFO_SHOW_MEMORY" => sec.memory = on,
+                "VPSINFO_SHOW_DISK" => sec.disk = on,
+                "VPSINFO_SHOW_NETWORK" => sec.network = on,
+                "VPSINFO_SHOW_PROCESSES" => sec.processes = on,
+                "VPSINFO_SHOW_DOCKER" => sec.docker = on,
+                "VPSINFO_SHOW_WEB" => sec.web = on,
+                "VPSINFO_SHOW_PORTS" => sec.ports = on,
+                "VPSINFO_SHOW_SECURITY" => sec.security = on,
+                "VPSINFO_SHOW_MAINT" => sec.maint = on,
+                "VPSINFO_SHOW_TOOLS" => sec.tools = on,
+                "VPSINFO_SHOW_FOOTER" => sec.footer = on,
+                "VPSINFO_FRAME" => s.frame = on,
+                "VPSINFO_COLOR" => s.color = ColorMode::parse(v),
+                "VPSINFO_SKIP_CPU" => s.live_cpu_sample = !on,
+                "VPSINFO_SKIP_UPDATES" => s.update_counts = !on,
+                "NO_PUBLIC_IP" => s.public_ip = !on,
+                "VPSINFO_SKIP_GEO" => s.geo_asn = !on,
+                _ => {}
+            }
+        }
+        s
+    }
+
+    /// Serialize a profile to pretty JSON (V9 export).
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Deserialize a profile from JSON (V9 import).
+    pub fn from_json(txt: &str) -> Option<Settings> {
+        serde_json::from_str(txt).ok()
+    }
 }
 
 /// Undo/redo snapshot history for settings.
@@ -312,6 +459,26 @@ impl History {
     }
 }
 
+/// Which settings groups the user collapsed (persisted, V2 item #3).
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
+pub struct CollapsedGroups {
+    pub appearance: bool,
+    pub sections: bool,
+    pub behavior: bool,
+    pub paths: bool,
+}
+
+impl Default for CollapsedGroups {
+    fn default() -> Self {
+        Self {
+            appearance: false,
+            sections: false,
+            behavior: false,
+            paths: false,
+        }
+    }
+}
+
 /// Everything we persist across launches (profiles + window/tab state).
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct GuiState {
@@ -323,6 +490,16 @@ pub struct GuiState {
     pub window_rect: Option<[f32; 4]>,
     #[serde(default)]
     pub active_tab: Option<Tab>,
+    #[serde(default)]
+    pub collapsed: CollapsedGroups,
+    #[serde(default = "default_preview_font_size")]
+    pub preview_font_size: f32,
+    #[serde(default)]
+    pub first_run_dismissed: bool,
+}
+
+fn default_preview_font_size() -> f32 {
+    13.0
 }
 
 impl Default for GuiState {
@@ -332,6 +509,9 @@ impl Default for GuiState {
             current_profile: "Default".into(),
             window_rect: None,
             active_tab: None,
+            collapsed: CollapsedGroups::default(),
+            preview_font_size: default_preview_font_size(),
+            first_run_dismissed: false,
         };
         s.profiles.insert("Default".into(), Settings::default());
         s

@@ -260,6 +260,39 @@ pub fn lines_to_job(lines: &[Line], size: f32) -> LayoutJob {
     job
 }
 
+/// Maximum character width of mock lines (for wrap-aware preview, V2 #23).
+pub fn mock_max_width(lines: &[Line]) -> usize {
+    lines
+        .iter()
+        .map(|l| l.iter().map(|(t, _, _, _)| t.chars().count()).sum())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Maximum character width of ANSI text after stripping SGR escapes.
+pub fn ansi_max_width(text: &str) -> usize {
+    let stripped: String = strip_ansi(text);
+    stripped.lines().map(|l| l.chars().count()).max().unwrap_or(0)
+}
+
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for n in chars.by_ref() {
+                if ('@'..='~').contains(&n) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Parse ANSI SGR escapes from real-script output into a LayoutJob.
 pub fn ansi_to_job(text: &str, size: f32) -> LayoutJob {
     let font = FontId::monospace(size);

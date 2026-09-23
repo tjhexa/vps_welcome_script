@@ -165,3 +165,70 @@ pub fn start_preview(settings: &Settings) -> PreviewState {
     });
     PreviewState::Running { rx }
 }
+
+/// Install the baked script + an SSH-only /etc/profile.d hook system-wide
+/// (V12, GUI-SUGGESTIONS #14). Privileged steps go through `sudo`; from a
+/// terminal sudo prompts normally, from the GUI it needs a password agent.
+pub fn install_system(settings: &Settings) -> io::Result<String> {
+    let bin = "/usr/local/bin/vpsinfo";
+    let baked = export_baked_text(settings, "Default");
+    if settings.script_path.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "script path is empty",
+        ));
+    }
+    write_priv(bin, &baked, true)?;
+    let hook = format!(
+        "# ---- vpsinfo:start ----\nif [ -n \"${{SSH_CONNECTION:-}}\" ] && [ -x {bin} ]; then\n    {bin}\nfi\n# ---- vpsinfo:end ----\n"
+    );
+    write_priv("/etc/profile.d/vpsinfo.sh", &hook, false)?;
+    Ok(format!("installed: {bin} + /etc/profile.d/vpsinfo.sh (SSH logins only)"))
+}
+
+/// Remove the system-wide install (V12 companion).
+pub fn uninstall_system() -> io::Result<String> {
+    run_sudo(&["rm", "-f", "/usr/local/bin/vpsinfo", "/etc/profile.d/vpsinfo.sh"])?;
+    Ok("removed /usr/local/bin/vpsinfo + /etc/profile.d/vpsinfo.sh".to_string())
+}
+
+/// `sudo tee <path>` with the content piped via stdin; optionally chmod 755.
+fn write_priv(path: &str, content: &str, exec: bool) -> io::Result<()> {
+    let mut child = Command::new("sudo")
+        .args(["tee", path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()?;
+    if let Some(mut si) = child.stdin.take() {
+        si.write_all(content.as_bytes())?;
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("sudo tee {path} exited {status}"),
+        ));
+    }
+    if exec {
+        let st = Command::new("sudo").args(["chmod", "755", path]).status()?;
+        if !st.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("sudo chmod {path} exited {st}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_sudo(args: &[&str]) -> io::Result<()> {
+    let status = Command::new("sudo").args(args).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("sudo {} exited {status}", args.join(" ")),
+        ))
+    }
+}
