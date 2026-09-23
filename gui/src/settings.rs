@@ -560,3 +560,43 @@ impl GuiState {
             .unwrap_or_default()
     }
 }
+/// First-run welcome window state machine (V7 #26).
+/// Returns `(keep_open, first_run_dismissed)`.
+/// Get started or the X button close the window *now*; the "don't show
+/// again" checkbox only decides whether it reappears on the next launch.
+pub fn welcome_decision(open: bool, got_started: bool, dont: bool, was_dismissed: bool) -> (bool, bool) {
+    if !open || got_started {
+        (false, dont)
+    } else {
+        (true, was_dismissed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::welcome_decision;
+
+    #[test]
+    fn get_started_without_checkbox_closes_now() {
+        // Regression: prior code kept the window open forever when the
+        // "don't show again" checkbox was left unticked.
+        assert_eq!(welcome_decision(true, true, false, false), (false, false));
+    }
+
+    #[test]
+    fn get_started_with_checkbox_dismisses_forever() {
+        assert_eq!(welcome_decision(true, true, true, false), (false, true));
+    }
+
+    #[test]
+    fn close_button_uses_checkbox_state() {
+        assert_eq!(welcome_decision(false, false, false, false), (false, false));
+        assert_eq!(welcome_decision(false, false, true, false), (false, true));
+    }
+
+    #[test]
+    fn still_open_keeps_state() {
+        assert_eq!(welcome_decision(true, false, false, false), (true, false));
+        assert_eq!(welcome_decision(true, false, true, true), (true, true));
+    }
+}

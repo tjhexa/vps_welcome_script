@@ -44,6 +44,7 @@ pub struct App {
     pub wizard_step: usize,
     pub wizard_purpose: usize,
     pub wizard_draft: crate::settings::Sections,
+    pub welcome: bool,
 }
 
 impl App {
@@ -59,6 +60,7 @@ impl App {
         let history = History::new(settings.clone());
         let rc_files = rc::candidates();
         let last_snapshot = settings.clone();
+        let welcome = !gui.first_run_dismissed;
         Self {
             settings,
             history,
@@ -81,6 +83,7 @@ impl App {
             wizard_step: 0,
             wizard_purpose: 0,
             wizard_draft: settings::Sections::docker_host(),
+            welcome,
         }
     }
 
@@ -455,7 +458,7 @@ impl App {
             }
         });
 
-        if !self.gui.first_run_dismissed {
+        if self.welcome {
             self.first_run_window(ctx);
         }
 
@@ -759,8 +762,10 @@ impl App {
     }
 
     /// V7 (#26): one-time welcome popup with a “don't show again” checkbox.
+    /// `self.welcome` is the window's real open-state; Get started / the X
+    /// close it for the session, and the checkbox decides future launches.
     fn first_run_window(&mut self, ctx: &Context) {
-        let mut open = true;
+        let mut open = self.welcome;
         let mut got_started = false;
         let mut dont = false;
         egui::Window::new("Welcome to vpsinfo-gui")
@@ -787,10 +792,11 @@ impl App {
                     got_started = true;
                 }
             });
-        if got_started || !open {
-            // Shown only while first_run_dismissed == false; persist the
-            // user's choice when the window closes (X or Get started).
-            self.gui.first_run_dismissed = dont;
+        let (keep_open, dismissed) =
+            settings::welcome_decision(open, got_started, dont, self.gui.first_run_dismissed);
+        if !keep_open {
+            self.welcome = false;
+            self.gui.first_run_dismissed = dismissed;
             self.gui.save();
         }
     }
