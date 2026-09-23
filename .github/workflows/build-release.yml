@@ -1,0 +1,114 @@
+# Build the Linux `vpsinfo-gui` binary and, on version tags, publish a
+# GitHub Release with versioned artifacts.
+#
+#   - Every push / PR to `main`  -> build + test + upload CI artifacts
+#   - Tag push `vX.Y.Z`          -> same build, plus a GitHub Release named
+#                                   `vX.Y.Z` with the binaries attached
+#   - Manual run via the Actions tab (workflow_dispatch)
+#
+# Linux-only by design: the artifact is a self-contained ELF binary (the
+# script + font are embedded), so there is no macOS/Windows matrix.
+
+name: Build & Release (Linux GUI)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*'] # vX.Y.Z tags publish a GitHub Release
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # needed to publish GitHub Releases from tags
+
+jobs:
+  build-linux:
+    name: Build vpsinfo-gui (Linux)
+    runs-on: ubuntu-latest
+    # Build inside a Debian 11 container so the binary links against glibc 2.31
+    # (a runner image would give a much newer glibc). The result then runs on
+    # anything Debian 11+ / Ubuntu 20.04+ — see README » Share / distribute
+    # the binary » for the portability notes this mirrors.
+    container:
+      image: debian:11
+    steps:
+      - name: Base tooling for the container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl pkg-config build-essential
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install eframe/egui Linux libraries
+        # Same package set the egui project uses for its own Linux CI
+        # (X11 + Wayland + GL development headers at build time).
+        run: |
+          apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libgtk-3-dev libglib2.0-dev \
+            libwayland-dev libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgl1-mesa-dev libgles2-mesa-dev libssl-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui
+
+      # Versioning: tag builds use the tag (`v0.2.0` -> `0.2.0`), everything
+      # else uses the Cargo.toml version + short commit SHA so each CI run has
+      # a unique, sortable artifact suffix.
+      - name: Compute version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            CARGO_VER="$(sed -n 's/^version = "\(.*\)"/\1/p' gui/Cargo.toml | head -n1)"
+            VER="${CARGO_VER}-${GITHUB_SHA::8}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --release --locked --manifest-path gui/Cargo.toml
+
+      - name: Run tests
+        run: cargo test --locked --manifest-path gui/Cargo.toml
+
+      - name: Smoke test the binary (headless CLI face of the same binary)
+        run: |
+          ./gui/target/release/vpsinfo-gui --generate --dry-run | grep -q '^VPSINFO_SHOW_SUMMARY='
+
+      - name: Package artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          NAME="vpsinfo-gui-${VERSION}-linux-x86_64"
+          install -m 0755 gui/target/release/vpsinfo-gui "artifacts/${NAME}"
+          tar -C artifacts -czf "artifacts/${NAME}.tar.gz" "${NAME}"
+          (cd artifacts && sha256sum "${NAME}" "${NAME}.tar.gz" > SHA256SUMS.txt)
+          ls -lh artifacts
+
+      - name: Upload artifacts (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpsinfo-gui-${{ steps.version.outputs.version }}-linux-x86_64
+          path: artifacts/
+
+      - name: Publish GitHub Release (version tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          files: artifacts/*
+          generate_release_notes: true

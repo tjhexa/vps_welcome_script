@@ -187,6 +187,14 @@ Then they just `chmod +x vpsinfo-gui && ./vpsinfo-gui` — no Rust, no build too
 no extra libraries to fetch. The baked `--export` script it produces is even more
 portable: a single bash file that runs anywhere bash 3+ exists.
 
+**Prebuilt binaries:** the repo's GitHub Actions workflow
+(`.github/workflows/build-release.yml`) builds the same release binary on every
+push/PR and publishes versioned Linux artifacts. Push a `vX.Y.Z` tag and a
+GitHub Release is created automatically with `vpsinfo-gui-<version>-linux-x86_64`,
+its `.tar.gz`, and SHA-256 checksums — grab those from the **Releases** page
+instead of building locally. CI builds inside a Debian 11 container so the
+binary keeps a wide glibc baseline (Debian 11+ / Ubuntu 20.04+).
+
 Notes on portability:
 
 - The binary is built for the architecture of the build machine (`x86_64` here;
