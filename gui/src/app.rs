@@ -1249,22 +1249,33 @@ impl App {
                 .weak(),
         );
         ui.add_space(6.0);
+        // Clickable step tabs — jump straight to any step.
         ui.horizontal(|ui| {
             for (i, name) in ["1 · Purpose", "2 · Sections", "3 · Confirm"].iter().enumerate() {
-                let _ = ui.selectable_label(self.wizard_step == i, *name);
+                if ui.selectable_label(self.wizard_step == i, *name).clicked() {
+                    self.wizard_step = i;
+                }
             }
         });
         ui.separator();
-        match self.wizard_step {
-            0 => self.wizard_purpose_ui(ui),
-            1 => self.wizard_sections_ui(ui),
-            _ => self.wizard_confirm_ui(ui),
-        }
+        // Scroll the step body so the nav buttons below stay visible even
+        // when the Sections grid is tall.
+        ScrollArea::vertical()
+            .id_salt("wizard_body")
+            .auto_shrink([false, false])
+            .show(ui, |ui| match self.wizard_step {
+                0 => self.wizard_purpose_ui(ui),
+                1 => self.wizard_sections_ui(ui),
+                _ => self.wizard_confirm_ui(ui),
+            });
         ui.add_space(10.0);
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(self.wizard_step > 0, egui::Button::new("Back"))
+                .add_enabled(
+                    settings::wizard_back_enabled(self.wizard_step),
+                    egui::Button::new("Back"),
+                )
                 .clicked()
             {
                 self.wizard_step -= 1;
@@ -1273,7 +1284,7 @@ impl App {
             let label = if last { "Apply & go to Settings" } else { "Next" };
             if ui
                 .add_enabled(
-                    last || self.wizard_step == 1,
+                    settings::wizard_next_enabled(self.wizard_step),
                     egui::Button::new(RichText::new(label).strong()),
                 )
                 .clicked()
@@ -1309,12 +1320,8 @@ impl App {
         let (name, _, _) = WIZARD_PURPOSES[self.wizard_purpose];
         ui.label(RichText::new(format!("Trim the “{name}” preset to taste — the preview below updates live.")).weak());
         ui.add_space(6.0);
-        ScrollArea::vertical()
-            .id_salt("wizard_sections")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                sections_grid(ui, &mut self.wizard_draft);
-            });
+        // The outer wizard ScrollArea handles overflow; render the grid inline.
+        sections_grid(ui, &mut self.wizard_draft);
         ui.add_space(8.0);
         let lines = preview::build_mock(&self.wizard_draft, false);
         let job = preview::lines_to_job(&lines, 12.0);

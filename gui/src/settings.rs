@@ -572,9 +572,18 @@ pub fn welcome_decision(open: bool, got_started: bool, dont: bool, was_dismissed
     }
 }
 
+/// Wizard nav enablement (#24). Next is enabled on steps 0 and 1; on the
+/// last step (2) the button becomes "Apply". Back is enabled from step 1 on.
+pub fn wizard_next_enabled(step: usize) -> bool {
+    step < 2
+}
+pub fn wizard_back_enabled(step: usize) -> bool {
+    step > 0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::welcome_decision;
+    use super::{welcome_decision, wizard_back_enabled, wizard_next_enabled};
 
     #[test]
     fn get_started_without_checkbox_closes_now() {
@@ -598,5 +607,21 @@ mod tests {
     fn still_open_keeps_state() {
         assert_eq!(welcome_decision(true, false, false, false), (true, false));
         assert_eq!(welcome_decision(true, false, true, true), (true, true));
+    }
+
+    #[test]
+    fn wizard_next_enabled_on_step_0() {
+        // Regression: the next button used to be disabled on the very first
+        // step, so the wizard could never leave "1 · Purpose".
+        assert!(wizard_next_enabled(0));
+        assert!(wizard_next_enabled(1));
+        assert!(!wizard_next_enabled(2)); // becomes "Apply & go to Settings"
+    }
+
+    #[test]
+    fn wizard_back_only_from_later_steps() {
+        assert!(!wizard_back_enabled(0));
+        assert!(wizard_back_enabled(1));
+        assert!(wizard_back_enabled(2));
     }
 }
