@@ -26,12 +26,13 @@ jobs:
   build-linux:
     name: Build vpsinfo-gui (Linux)
     runs-on: ubuntu-latest
-    # Build inside a Debian 11 container so the binary links against glibc 2.31
-    # (a runner image would give a much newer glibc). The result then runs on
-    # anything Debian 11+ / Ubuntu 20.04+ — see README » Share / distribute
-    # the binary » for the portability notes this mirrors.
+    # Build inside an old-but-still-supported container so the binary links
+    # against an older glibc (a fresh runner image would give a much newer
+    # one). Ubuntu 22.04 (jammy) => glibc 2.35, in standard support until
+    # April 2027 (Debian 11 is EOL and its apt repos already 404 — don't use
+    # it here). The result then runs on anything Debian 12+ / Ubuntu 22.04+.
     container:
-      image: debian:11
+      image: ubuntu:22.04
     steps:
       - name: Base tooling for the container
         run: |

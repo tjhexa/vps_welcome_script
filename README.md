@@ -193,7 +193,7 @@ push/PR and publishes versioned Linux artifacts. Push a `vX.Y.Z` tag and a
 GitHub Release is created automatically with `vpsinfo-gui-<version>-linux-x86_64`,
 its `.tar.gz`, and SHA-256 checksums — grab those from the **Releases** page
 instead of building locally. CI builds inside a Debian 11 container so the
-binary keeps a wide glibc baseline (Debian 11+ / Ubuntu 20.04+).
+binary keeps a wide glibc baseline (Debian 12+ / Ubuntu 22.04+).
 
 Notes on portability:
 
