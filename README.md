@@ -103,12 +103,20 @@ No root required. Nothing is installed system-wide — it just reads.
 
 `vpsinfo-gui` is a small **Rust/egui** app in `gui/` — same repo, same script. It
 lets you toggle the sections visually, preview the banner live, manage which
-shell rc-files source it, and write your config. Build it with:
+shell rc-files source it, and write your config.
 
 ```bash
+# debug build (fast compile, unoptimized — good for development)
 cd gui
-cargo build --release          # binary: gui/target/release/vpsinfo-gui
-./target/release/vpsinfo-gui   # run the GUI
+cargo build                 # binary: gui/target/debug/vpsinfo-gui
+./target/debug/vpsinfo-gui
+
+# release build (optimized, stripped — what you ship)
+cargo build --release       # binary: gui/target/release/vpsinfo-gui
+./target/release/vpsinfo-gui
+
+# or skip the explicit build and just run
+cargo run --release
 ```
 
 The GUI has four tabs:
@@ -140,6 +148,45 @@ vpsinfo-gui --check-rc                       # exit 0 = sourced, 1 = not, 2 = no
 Config keys can also be passed as flags — `--color auto|always|never`,
 `--frame 0|1`, `--ssh-only 0|1`, `--preset server-minimal|desktop-full|docker-host|all-off`,
 `--script PATH` (which script the rc hook should run).
+
+### Share / distribute the binary
+
+`vpsinfo-gui` is a **single self-contained ELF binary** — `vps-info.sh` and the
+monospace preview font are embedded inside it, so there's nothing to install
+alongside it. The release build is ~12 MB and already stripped.
+
+What it needs at runtime:
+
+| Face | Runtime requirements |
+| --- | --- |
+| **CLI** (`--generate`, `--export`, `--rc-add`, `--rc-remove`, `--check-rc`) | Nothing but a standard `glibc` (libc/libm/libgcc — every desktop/server has these). Works headless, over SSH, in containers. |
+| **GUI** | A display with X11 or Wayland and an OpenGL driver (mesa on most desktops). GL is loaded at startup via `dlopen`, so a machine without *any* GL stack will still run the CLI fine. GUI runs acceptably on a 960×600 window or bigger. |
+
+To hand the binary to someone:
+
+```bash
+cd gui
+cargo build --release
+strip -s target/release/vpsinfo-gui          # already stripped, but belt & braces
+tar -czf vpsinfo-gui-linux-x86_64.tar.gz -C target/release vpsinfo-gui
+```
+
+Then they just `chmod +x vpsinfo-gui && ./vpsinfo-gui` — no Rust, no build tools,
+no extra libraries to fetch. The baked `--export` script it produces is even more
+portable: a single bash file that runs anywhere bash 3+ exists.
+
+Notes on portability:
+
+- The binary is built for the architecture of the build machine (`x86_64` here;
+  other targets via `cargo build --release --target aarch64-unknown-linux-gnu`,
+  etc. — install the target with `rustup target add …`).
+- It links against **glibc**, so build near the *oldest* distro you need to
+  support (or in a container/Docker with an older base image, e.g. Debian 11)
+  to get the widest compatibility.
+- For a fully static binary: `cargo build --release --target x86_64-unknown-linux-musl`
+  (needs `rustup target add x86_64-unknown-linux-musl`). The CLI then runs on
+  any Linux regardless of glibc version; the GUI still needs an OpenGL driver,
+  which is standard on desktops.
 
 ### Run on every SSH login
 

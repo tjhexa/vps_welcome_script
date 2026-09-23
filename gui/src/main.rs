@@ -25,11 +25,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut viewport = egui::ViewportBuilder::default().with_title("vpsinfo-gui");
     if let Some(r) = gui_state.window_rect {
-        viewport = viewport.with_inner_size([r[2].max(640.0), r[3].max(480.0)]);
+        viewport = viewport.with_inner_size([r[2].max(960.0), r[3].max(620.0)]);
         viewport = viewport.with_position([r[0], r[1]]);
     } else {
-        viewport = viewport.with_inner_size([980.0, 680.0]);
+        viewport = viewport.with_inner_size([1120.0, 760.0]);
     }
+    viewport = viewport.with_min_inner_size([960.0, 620.0]);
 
     let options = eframe::NativeOptions {
         viewport,

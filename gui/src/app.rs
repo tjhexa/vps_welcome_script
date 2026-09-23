@@ -43,6 +43,7 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, gui: GuiState) -> Self {
+        install_fonts(&cc.egui_ctx);
         let settings = gui.current_settings();
         let theme = settings.theme;
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
@@ -333,7 +334,7 @@ impl App {
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let light = self.settings.theme == Theme::Light;
-                    let label = if light { "🌙 dark" } else { "☀ light" };
+                    let label = if light { "Dark mode" } else { "Light mode" };
                     if ui
                         .small_button(label)
                         .on_hover_text("Toggle dark/light theme")
@@ -428,7 +429,7 @@ impl App {
             ui.add_space(8.0);
 
             ui.heading("Appearance");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Color mode:");
                 self.color_mode_combo(ui);
                 ui.checkbox(&mut self.settings.frame, "Frame around output")
@@ -462,7 +463,7 @@ impl App {
     }
 
     fn profiles_row(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Profile:");
             let names: Vec<String> = self.gui.profiles.keys().cloned().collect();
             let cur = self.gui.current_profile.clone();
@@ -484,7 +485,7 @@ impl App {
             let add_ok = !self.new_profile_name.trim().is_empty()
                 && !self.gui.profiles.contains_key(self.new_profile_name.trim());
             if ui
-                .add_enabled(add_ok, egui::Button::new("✚ save as"))
+                .add_enabled(add_ok, egui::Button::new("Save as"))
                 .on_hover_text("Save current settings as a new named profile")
                 .clicked()
             {
@@ -496,7 +497,7 @@ impl App {
                 self.set_status(preview::GREEN, "profile saved");
             }
             if ui
-                .add_enabled(self.gui.profiles.len() > 1, egui::Button::new("✖ delete"))
+                .add_enabled(self.gui.profiles.len() > 1, egui::Button::new("Delete"))
                 .on_hover_text("Delete the current profile")
                 .clicked()
             {
@@ -505,7 +506,7 @@ impl App {
                 self.gui.current_profile = self.gui.profiles.keys().next().unwrap().clone();
                 self.switch_profile(self.gui.current_profile.clone());
             }
-            if ui.button("💾 save").on_hover_text("Save current settings into this profile").clicked() {
+            if ui.button("Save").on_hover_text("Save current settings into this profile").clicked() {
                 self.save_current_profile();
                 self.set_status(preview::GREEN, "profile saved");
             }
@@ -590,16 +591,16 @@ impl App {
     }
 
     fn output_buttons(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .button(RichText::new("⚙ Generate config").strong())
+                .button(RichText::new("Generate config").strong())
                 .on_hover_text("Write the runtime config file (KEY=VALUE) read by vps-info.sh · Ctrl+S")
                 .clicked()
             {
                 self.request_generate();
             }
             if ui
-                .button(RichText::new("📦 Export baked script").strong())
+                .button(RichText::new("Export baked script").strong())
                 .on_hover_text("Write a standalone script with these values embedded (VPSINFO_NO_CONFIG=1)")
                 .clicked()
             {
@@ -611,9 +612,9 @@ impl App {
     // ---------------------------------------------------------------- preview tab
 
     fn preview_ui(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .button("▶ Run real preview")
+                .button("Run real preview")
                 .on_hover_text("Execute the embedded script with the current settings (8s timeout, network off) · Ctrl+Enter")
                 .clicked()
             {
@@ -643,7 +644,7 @@ impl App {
                     }
                     PreviewState::Done(o) => {
                         if o.timed_out {
-                            ui.colored_label(preview::YELLOW, "⚠ preview timed out after 8s — some scans may be missing");
+                            ui.colored_label(preview::YELLOW, "preview timed out after 8s — some scans may be missing");
                         }
                         if let Some(e) = &o.error {
                             if !e.trim().is_empty() {
@@ -662,7 +663,7 @@ impl App {
     fn rc_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("rc files");
         ui.label(
-            RichText::new("Tick the files to edit. “sourced ✓” means the vpsinfo hook is already installed.")
+            RichText::new("Tick the files to edit. “sourced” means the vpsinfo hook is already installed.")
                 .weak(),
         );
         ui.add_space(4.0);
@@ -682,7 +683,7 @@ impl App {
                             .on_hover_text(path.display().to_string());
                         if exists {
                             if sourced {
-                                ui.colored_label(preview::GREEN, "sourced ✓");
+                                ui.colored_label(preview::GREEN, "sourced");
                             } else {
                                 ui.colored_label(preview::YELLOW, "not sourced");
                             }
@@ -729,23 +730,29 @@ impl App {
         let block = rc::build_block(&self.settings.script_path, self.settings.ssh_only);
         ui.add_space(6.0);
         ui.label("rc-block preview (exactly what gets appended):");
-        egui::Frame::group(ui.style())
-            .inner_margin(6.0)
+        ScrollArea::both()
+            .id_salt("rc_block_preview")
+            .max_height(150.0)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.monospace(block);
+                egui::Frame::group(ui.style())
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.monospace(block);
+                    });
             });
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .button(RichText::new("＋ Add to rc…").strong())
+                .button(RichText::new("Add to rc…").strong())
                 .on_hover_text("Preview the diff then append the hook block to the selected files (backup first)")
                 .clicked()
             {
                 self.request_rc_add();
             }
             if ui
-                .button(RichText::new("− Remove rc block…").strong())
+                .button(RichText::new("Remove rc block…").strong())
                 .on_hover_text("Strip only our marker block from the selected files (backup first)")
                 .clicked()
             {
@@ -838,7 +845,7 @@ impl App {
                         ui.label(RichText::new(&d.path).weak());
                     }
                     ui.add_space(6.0);
-                    ScrollArea::vertical()
+                    ScrollArea::both()
                         .max_height(340.0)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -862,7 +869,7 @@ impl App {
                         });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button(RichText::new("✔ Apply").strong()).clicked() {
+                        if ui.button(RichText::new("Apply").strong()).clicked() {
                             want_apply = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -896,6 +903,21 @@ impl eframe::App for App {
         }
         self.gui.save();
     }
+}
+
+/// Embed the Hack monospace font (OFL) so the banner preview renders
+/// identically on every machine, regardless of installed system fonts.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("hack".to_owned(), egui::FontData::from_owned(include_bytes!("../assets/Hack-Regular.ttf").to_vec()).into());
+    // Prepend Hack to the monospace family; egui falls back to its own
+    // fonts for any glyph Hack lacks (arrows, box-drawing, checks…).
+    if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        list.insert(0, "hack".to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 fn write_hunks(old: &str, new: &str) -> Vec<(String, Vec<(char, String)>)> {
